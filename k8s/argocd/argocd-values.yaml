@@ -24,6 +24,10 @@ configs:
   params:
     # Fail a sync that would take longer than this instead of hanging on it.
     controller.sync.timeout.seconds: "1800"
+    # Diff through a server-side-apply dry run instead of client-side. Most charts here sync with
+    # ServerSideApply=true, and the client-side diff misreads the large CRDs they ship (Kyverno,
+    # External Secrets): they showed permanently OutOfSync while a server-side diff was empty.
+    controller.diff.server.side: "true"
 
   cm:
     # Crossplane's recommendation: the per-MR ProviderConfigUsage objects churn constantly and
