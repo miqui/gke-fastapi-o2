@@ -23,12 +23,17 @@ spec:
   podSelector: {}
   policyTypes: [Egress]
   egress:
-    # GKE runs NodeLocal DNSCache: pods resolve through the node-local cache on the link-local
-    # address 169.254.20.10 (hostNetwork, so it can't be selected by pod labels), which falls back
-    # to kube-dns. Both are allowed. Without the ipBlock every lookup times out.
+    # GKE runs NodeLocal DNSCache: on Dataplane V2, lookups sent to the kube-dns Service are
+    # redirected to the node-local-dns pod on the same node (an ordinary pod, k8s-app:
+    # node-local-dns), which falls back to kube-dns. Allowing only kube-dns makes every lookup
+    # time out - verified live.
     - to:
-        - ipBlock:
-            cidr: 169.254.20.10/32
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: node-local-dns
         - namespaceSelector:
             matchLabels:
               kubernetes.io/metadata.name: kube-system

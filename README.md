@@ -115,6 +115,8 @@ through the GKE API server (locked to your IP + Google IAM) and binds on `127.0.
   then one policy per workload: `message-service` accepts only the load balancer's ranges
   (`35.191.0.0/16`, `130.211.0.0/22`) on 8080 and may only reach Hazelcast, Cloud SQL's range and
   the OTel Collector; Hazelcast and postgres-exporter accept only their clients and Prometheus.
+  DNS egress must allow the `node-local-dns` pods as well as kube-dns: GKE runs NodeLocal
+  DNSCache, and on Dataplane V2 lookups go to a pod on the same node.
   `observability` and `headlamp` are default-deny ingress. Kubelet probes and `kubectl
   port-forward` aren't subject to NetworkPolicy, so neither needs a rule.
 - **Secrets**: nothing secret is committed or passed through a script into the cluster. The values
