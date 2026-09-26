@@ -335,10 +335,10 @@ data:
         }
       ]
     }
-  kind-cluster-ops.json: |
+  cluster-ops.json: |
     {
-      "title": "kind cluster ops",
-      "uid": "kind-cluster-ops",
+      "title": "Cluster ops",
+      "uid": "cluster-ops",
       "timezone": "browser",
       "schemaVersion": 39,
       "refresh": "10s",

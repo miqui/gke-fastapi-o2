@@ -14,8 +14,6 @@ spec:
       labels:
         app: hazelcast
     spec:
-      nodeSelector:
-        workload: cache
       securityContext:
         # 100:101 is the `hazelcast` user in hazelcast/hazelcast, and coincidentally also
         # `curl_user` in curlimages/curl - so one pod-level identity covers the init container

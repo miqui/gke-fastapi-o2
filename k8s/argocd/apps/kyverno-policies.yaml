@@ -1,8 +1,7 @@
 # ArgoCD Application syncing k8s/policies/ - the Kyverno policies and PolicyExceptions (see the
-# kustomization there for the layout). Kyverno itself is installed by deploy-kind.sh (step 4c), not
-# by Argo; this only owns the policy resources. deploy-kind.sh registers it *before* the
-# fastapi-o2 Application (application.yaml) so the enforce policies for `default`
-# are already in place when the workloads first sync.
+# kustomization there for the layout). Kyverno itself is the kyverno Application (previous wave);
+# this only owns the policy resources, and syncs before the workload Applications so the enforce
+# policies for `default` are already in place when the workloads first sync.
 #
 # Destination namespace is `kyverno` because the only namespaced resources here are the
 # PolicyExceptions, which Kyverno only honours from that namespace (features.policyExceptions in
@@ -12,10 +11,12 @@ kind: Application
 metadata:
   name: kyverno-policies
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-2"
 spec:
   project: default
   source:
-    repoURL: https://github.com/miqui/k8s-fastapi-o2.git
+    repoURL: https://github.com/miqui/gke-fastapi-o2.git
     targetRevision: main
     path: k8s/policies
   destination:

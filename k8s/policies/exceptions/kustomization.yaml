@@ -3,4 +3,3 @@ kind: Kustomization
 resources:
   - node-exporter.yaml
   - log-collector.yaml
-  - headlamp-admin.yaml

@@ -1,19 +1,21 @@
-# Values for the `headlamp/headlamp` chart (https://headlamp.dev/ - general-purpose
-# Kubernetes web UI, not tied to the message-service metrics stack). Installed with:
-#   helm upgrade --install headlamp headlamp/headlamp \
-#     --version 0.45.0 --namespace headlamp --create-namespace \
-#     -f k8s/headlamp/headlamp-values.yaml
+# Values for the `headlamp/headlamp` chart 0.45.0 (https://headlamp.dev/ - general-purpose
+# Kubernetes web UI, not tied to the message-service metrics stack), rendered by
+# k8s/argocd/apps/headlamp.yaml.
 #
-# No custom auth is configured (no OIDC), so the login page needs a bearer token for
-# whichever identity you want to browse as. The chart's default ClusterRoleBinding
-# grants its own "headlamp" ServiceAccount cluster-admin, so the simplest local token is:
-#   kubectl create token headlamp -n headlamp --duration=24h
-# That's cluster-admin in the browser - acceptable for this disposable local kind
-# cluster only (same caveat as the plaintext defaults in k8s/secret.yaml and
-# k8s/observability/grafana-secret.yaml); do not reuse this setup anywhere shared.
+# Highest-risk tool in the cluster (it can browse everything, and with enough RBAC exec into pods
+# and edit anything), so:
+#   - no Ingress/LoadBalancer: reach it with gke-port-forward.sh (http://localhost:4466), which
+#     rides on `kubectl port-forward` - i.e. the GKE API server, locked to the operator's IP and
+#     Google IAM;
+#   - its ServiceAccount is bound to the built-in read-only `view` ClusterRole (no Secrets, no
+#     exec, no writes), not the chart's default cluster-admin. Log in with:
+#       kubectl create token headlamp -n headlamp --duration=1h
+#     For an admin session, mint a short-lived token for an identity that has it on demand
+#     rather than giving Headlamp standing admin rights - see README "Headlamp".
 
-nodeSelector:
-  workload: observability
+clusterRoleBinding:
+  create: true
+  clusterRoleName: view
 
 config:
   # The chart bundles the official Prometheus plugin (headlamp-k8s/plugins/prometheus, "Show
@@ -33,11 +35,4 @@ resources:
     memory: "256Mi"
 
 ingress:
-  enabled: true
-  ingressClassName: "nginx"
-  hosts:
-    - host: headlamp.localhost
-      paths:
-        - path: /
-          type: Prefix
-  tls: []
+  enabled: false

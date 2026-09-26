@@ -30,7 +30,7 @@ spec:
     - name: allowed
       expression: >-
         [
-          'docker.io/miqui/rest-message-api',
+          'us-central1-docker.pkg.dev/k8s-dev-412419/api-images/rest-message-api',
           'docker.io/library/postgres',
           'docker.io/library/busybox',
           'docker.io/library/nginx',

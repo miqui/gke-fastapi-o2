@@ -11,7 +11,7 @@ export const options = {
   },
 };
 
-const BASE_URL = __ENV.BASE_URL || 'http://localhost';
+const BASE_URL = __ENV.BASE_URL || 'https://api.miqui.dev';
 
 export default function () {
   const res = http.get(`${BASE_URL}/messages?limit=50`, { tags: { name: 'GetAllMessages' } });

@@ -5,7 +5,8 @@ metadata:
   labels:
     app: message-service
 data:
-  DB_HOST: "postgres"
+  # DB_HOST is not here: it's the Cloud SQL instance's private IP, read from the
+  # cloudsql-connection Secret Crossplane writes (see deployment.yaml and postgres.yaml).
   DB_PORT: "5432"
   DB_NAME: "messagedb"
   OTEL_METRICS_URL: "http://otel-collector.observability.svc.cluster.local:4318/v1/metrics"
@@ -17,15 +18,6 @@ data:
   HAZELCAST_HOST: "hazelcast"
   HAZELCAST_PORT: "5701"
   # /docs, /redoc and /openapi.json are only served when this is exactly "true" (anything other
-  # than "true"/"false" fails startup - see app/settings.py). Fine for this disposable dev
-  # cluster; leave it off anywhere real.
+  # than "true"/"false" fails startup - see app/settings.py). On for this dev cluster; note it's
+  # publicly reachable at https://api.miqui.dev/docs while the API has no auth.
   API_DOCS_ENABLED: "true"
----
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: postgres-config
-  labels:
-    app: postgres
-data:
-  POSTGRES_DB: "messagedb"

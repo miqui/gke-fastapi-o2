@@ -11,7 +11,7 @@ export const options = {
   },
 };
 
-const BASE_URL = __ENV.BASE_URL || 'http://localhost';
+const BASE_URL = __ENV.BASE_URL || 'https://api.miqui.dev';
 const jsonHeaders = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
 
 // Every message needs an author (see app/models.py's required Message.author relation) - create

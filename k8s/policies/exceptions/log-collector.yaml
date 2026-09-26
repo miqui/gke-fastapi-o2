@@ -1,4 +1,4 @@
-# log-collector reads pod logs from the node: a hostPath mount of /var/log/pods, which on the kind
+# log-collector reads pod logs from the node: a hostPath mount of /var/log/pods, which on the GKE
 # nodes is root:root 0750 with 0640 files, so it also has to run as root. Exempt it from the
 # host-access rule (hostPath) and the container-context rule (runAsNonRoot) - in the audit set
 # only; the enforce set covers just the `default` namespace, which log-collector isn't in. The

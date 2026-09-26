@@ -15,8 +15,6 @@ spec:
       labels:
         app: grafana
     spec:
-      nodeSelector:
-        workload: observability
       containers:
         - name: grafana
           image: grafana/grafana:11.3.1

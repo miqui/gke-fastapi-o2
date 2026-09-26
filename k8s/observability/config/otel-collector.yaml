@@ -11,11 +11,11 @@ processors:
 
 extensions:
   # OpenObserve's OTLP endpoint needs the same root basic auth Prometheus' remote_write
-  # uses. The password comes from the same Secret (openobserve-remote-write-credentials,
+  # uses. Username and password come from the same Secret (openobserve-remote-write-credentials,
   # see otel-collector-deployment.yaml) so it never lands in this ConfigMap.
   basicauth/openobserve:
     client_auth:
-      username: root@example.com
+      username: ${env:OPENOBSERVE_USER}
       password: ${env:OPENOBSERVE_PASSWORD}
 
 exporters:

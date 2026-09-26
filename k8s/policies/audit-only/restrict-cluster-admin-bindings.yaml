@@ -20,13 +20,14 @@ spec:
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
         resources: ["clusterrolebindings"]
-  # Skip what Kubernetes/kubeadm create themselves.
+  # Skip what Kubernetes and GKE create themselves.
   matchConditions:
     - name: not-built-in
       expression: >-
         !(object.metadata.name == 'cluster-admin' ||
           object.metadata.name.startsWith('system:') ||
-          object.metadata.name.startsWith('kubeadm:'))
+          object.metadata.name.startsWith('gke-') ||
+          object.metadata.name.startsWith('gcp:'))
   validations:
     - expression: "object.roleRef.name != 'cluster-admin'"
       messageExpression: >-

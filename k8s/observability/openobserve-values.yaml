@@ -1,40 +1,35 @@
-# Values for the `openobserve/openobserve-standalone` chart (single-node OpenObserve,
-# not the HA/distributed chart). Installed with:
-#   helm upgrade --install openobserve openobserve/openobserve-standalone \
-#     --version 0.92.2 --namespace observability -f k8s/observability/openobserve-values.yaml
+# Values for the `openobserve/openobserve-standalone` chart 0.92.2 (single-node OpenObserve,
+# not the HA/distributed chart), rendered by k8s/argocd/apps/openobserve.yaml.
 #
 # Release name "openobserve" + chart name "openobserve-standalone" resolve (via the
 # chart's fullname template) to plain "openobserve" for every object name, so the
-# Service is reachable at openobserve.observability.svc.cluster.local:5080.
+# Service is reachable at openobserve.observability.svc.cluster.local:5080. No Ingress: the UI is
+# reached with gke-port-forward.sh (http://localhost:5080).
 
 nameOverride: "openobserve"
 
-# Local kind-cluster development credentials only - do not reuse these values
-# outside a disposable local cluster. k8s/observability/openobserve-prometheus-secret.yaml
-# must be kept in sync with these for Prometheus remote_write to authenticate.
+# Root credentials come from the openobserve-root-credentials Secret, which External Secrets
+# builds from GCP Secret Manager (externalsecrets.yaml in this directory) - nothing secret is in
+# this file or passed at install time. Prometheus/the collectors authenticate with the same
+# values via openobserve-remote-write-credentials.
 auth:
-  ZO_ROOT_USER_EMAIL: "YOUR_OPENOBSERVE_ROOT_EMAIL"
-  ZO_ROOT_USER_PASSWORD: "YOUR_OPENOBSERVE_ROOT_PASSWORD"
+  existingRootUserSecret:
+    name: openobserve-root-credentials
+    emailKey: ZO_ROOT_USER_EMAIL
+    passwordKey: ZO_ROOT_USER_PASSWORD
 
-nodeSelector:
-  workload: openobserve
-
-# The chart's default (3650 days) keeps data forever. Kind's default StorageClass
-# (rancher.io/local-path) does not enforce persistence.size below as a real quota - it
-# just writes to the node's underlying disk (Docker Desktop's VM disk) - so unbounded
-# retention plus any wider-scoped remote_write (e.g. cAdvisor/node-exporter ops metrics)
-# risks growing disk usage indefinitely. A few days is plenty for a local dev cluster.
+# The chart's default (3650 days) keeps data forever; the PVC below is a fixed 5Gi persistent
+# disk, and a few days is plenty for a dev cluster that's rebuilt regularly anyway.
 config:
   ZO_COMPACT_DATA_RETENTION_DAYS: "3"
   # Off by default - with it off, /metrics (self-monitoring: ingestion rate, HTTP request
   # latency, compactor, cache) returns 200 with an empty body, confirmed live.
   ZO_PROMETHEUS_ENABLED: "true"
 
-# Bumped from 250m/512Mi (req) & 1/1Gi (limit) when remote_write was widened beyond just
-# the message-service's own metrics to also carry cluster ops metrics (node-exporter,
-# kube-state-metrics, kubernetes-nodes-cadvisor - see write_relabel_configs in
-# k8s/observability/config/prometheus.yml) - cadvisor in particular is much
-# higher-cardinality (per-container, per-node) than the single-job feed this was sized for.
+# Sized for remote_write carrying cluster ops metrics (node-exporter, kube-state-metrics,
+# kubernetes-nodes-cadvisor - see write_relabel_configs in
+# k8s/observability/config/prometheus.yml) on top of the message-service's own metrics -
+# cadvisor in particular is much higher-cardinality (per-container, per-node).
 resources:
   requests:
     cpu: "500m"
@@ -43,18 +38,10 @@ resources:
     cpu: "2"
     memory: "2Gi"
 
+# GKE's default StorageClass (standard-rwo, pd-balanced).
 persistence:
   enabled: true
   size: 5Gi
 
 ingress:
-  enabled: true
-  className: "nginx"
-  annotations:
-    kubernetes.io/tls-acme: "false"
-  hosts:
-    - host: openobserve.localhost
-      paths:
-        - path: /
-          pathType: Prefix
-  tls: []
+  enabled: false

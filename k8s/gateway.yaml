@@ -1,0 +1,109 @@
+# Public entry point: https://api.miqui.dev -> message-service, through a GKE-managed global
+# external Application Load Balancer (Gateway API, gatewayClass gke-l7-global-external-managed).
+# The only thing in the cluster reachable from the internet; every tool is port-forward only.
+#
+# Everything the Gateway points at by name is created by gke-deploy.sh outside the cluster, so it
+# survives rebuilds and never lives in git:
+#   api-ip        global static IP (the Cloudflare A record points here)
+#   api-cert-map  Certificate Manager map -> Google-managed cert for api.miqui.dev (DNS-authorized)
+#   api-tls       SSL policy: MODERN profile, TLS 1.2 minimum
+#
+# The API itself has no authentication yet - anyone can call it, /docs included.
+apiVersion: gateway.networking.k8s.io/v1
+kind: Gateway
+metadata:
+  name: api
+  labels:
+    app: message-service
+  annotations:
+    networking.gke.io/certmap: api-cert-map
+spec:
+  gatewayClassName: gke-l7-global-external-managed
+  addresses:
+    - type: NamedAddress
+      value: api-ip
+  listeners:
+    # TLS for this listener comes from the cert map annotation above, so it has no `tls` block.
+    - name: https
+      protocol: HTTPS
+      port: 443
+    - name: http
+      protocol: HTTP
+      port: 80
+---
+# Plain HTTP only ever answers with a redirect.
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: api-http-redirect
+  labels:
+    app: message-service
+spec:
+  parentRefs:
+    - name: api
+      sectionName: http
+  hostnames:
+    - api.miqui.dev
+  rules:
+    - filters:
+        - type: RequestRedirect
+          requestRedirect:
+            scheme: https
+            statusCode: 301
+---
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
+metadata:
+  name: api
+  labels:
+    app: message-service
+spec:
+  parentRefs:
+    - name: api
+      sectionName: https
+  hostnames:
+    - api.miqui.dev
+  rules:
+    - backendRefs:
+        - name: message-service
+          port: 8080
+---
+# The load balancer's own health check (separate from the kubelet probes): the readiness
+# endpoint, so a pod that is draining (see app/__main__.py) or has lost its DB drops out of the
+# LB too, not just out of the Service.
+apiVersion: networking.gke.io/v1
+kind: HealthCheckPolicy
+metadata:
+  name: message-service
+  labels:
+    app: message-service
+spec:
+  default:
+    checkIntervalSec: 5
+    timeoutSec: 3
+    healthyThreshold: 1
+    unhealthyThreshold: 2
+    config:
+      type: HTTP
+      httpHealthCheck:
+        portSpecification: USE_FIXED_PORT
+        port: 8080
+        requestPath: /health/readiness
+  targetRef:
+    group: ""
+    kind: Service
+    name: message-service
+---
+apiVersion: networking.gke.io/v1
+kind: GCPGatewayPolicy
+metadata:
+  name: api
+  labels:
+    app: message-service
+spec:
+  default:
+    sslPolicy: api-tls
+  targetRef:
+    group: gateway.networking.k8s.io
+    kind: Gateway
+    name: api

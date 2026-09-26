@@ -16,8 +16,6 @@ spec:
         app: prometheus
     spec:
       serviceAccountName: prometheus
-      nodeSelector:
-        workload: observability
       containers:
         - name: prometheus
           image: prom/prometheus:v2.55.1

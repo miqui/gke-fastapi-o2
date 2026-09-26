@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Smoke-tests the message REST API end to end. Exits non-zero on the first failed check.
-# Usage: ./test-api.sh            (against the kind cluster's ingress, http://localhost)
+# Usage: ./test-api.sh            (against the public GKE endpoint, https://api.miqui.dev)
 #        BASE_URL=http://localhost:8080 ./test-api.sh
 set -euo pipefail
 
-BASE_URL="${BASE_URL:-http://localhost}"
+BASE_URL="${BASE_URL:-https://api.miqui.dev}"
 
 command -v jq >/dev/null 2>&1 || { echo "Error: jq is required."; exit 1; }
 
@@ -61,7 +61,7 @@ expect "create author is 201" 201 "${STATUS}"
 AUTHOR_ID=$(echo "${BODY}" | jq -r .id)
 
 echo -e "\n4. Create a valid message:"
-api POST /messages "{\"title\":\"Kubernetes Kind Deployment\",\"content\":\"FastAPI running on the kind cluster!\",\"authorId\":\"${AUTHOR_ID}\"}"
+api POST /messages "{\"title\":\"GKE Deployment\",\"content\":\"FastAPI running on GKE!\",\"authorId\":\"${AUTHOR_ID}\"}"
 expect "create message is 201" 201 "${STATUS}"
 MSG_ID=$(echo "${BODY}" | jq -r .id)
 expect "new message is at version 0" 0 "$(echo "${BODY}" | jq -r .version)"
@@ -78,7 +78,7 @@ expect "get is 200" 200 "${STATUS}"
 expect "id matches" "${MSG_ID}" "$(echo "${BODY}" | jq -r .id)"
 
 echo -e "\n7. Update message, version 0:"
-api PATCH "/messages/${MSG_ID}" '{"title":"Updated Title","content":"Updated content for the kind cluster","version":0}'
+api PATCH "/messages/${MSG_ID}" '{"title":"Updated Title","content":"Updated content on GKE","version":0}'
 expect "update is 200" 200 "${STATUS}"
 expect "version is bumped to 1" 1 "$(echo "${BODY}" | jq -r .version)"
 

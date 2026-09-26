@@ -1,7 +1,7 @@
 receivers:
   filelog:
     # Only the `default` namespace (message-service, postgres, hazelcast).
-    # Widening this to every pod (ingress-nginx, argocd, kube-system, ...) is a real risk
+    # Widening this to every pod (argocd, kube-system, crossplane-system, ...) is a real risk
     # for OpenObserve's 5Gi PVC and its single-node MemTable - see PROMETHEUS.md step 1.
     include: [/var/log/pods/default_*/*/*.log]
     # Required by the container operator below, which reads the pod/namespace/container
@@ -28,7 +28,7 @@ extensions:
   # Same root basic auth the metrics/traces collector uses (see config/otel-collector.yaml).
   basicauth/openobserve:
     client_auth:
-      username: root@example.com
+      username: ${env:OPENOBSERVE_USER}
       password: ${env:OPENOBSERVE_PASSWORD}
 
 exporters:

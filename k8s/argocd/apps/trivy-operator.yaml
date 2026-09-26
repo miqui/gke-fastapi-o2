@@ -1,12 +1,9 @@
 # ArgoCD Application installing the Trivy Operator (https://github.com/aquasecurity/trivy-operator)
-# from its upstream Helm chart - unlike Kyverno/OpenObserve/Headlamp, which deploy-kind.sh installs
-# with `helm upgrade --install`, this one is owned by Argo end to end, so bumping the chart version
-# or editing the values is a merged change like any other. See TRIVY.md.
+# from its upstream Helm chart, owned by Argo end to end like every other component, so bumping
+# the chart version or editing the values is a merged change like any other. See TRIVY.md.
 #
 # Two sources: this repo (only as a `$values` ref, so k8s/trivy-operator/trivy-operator-values.yaml
-# lives in git next to the other chart values) and the chart itself. The git source is listed
-# first on purpose - deploy-kind.sh's step 1b reads the first repoURL/targetRevision in each
-# Application file to check the repo is anonymously readable.
+# lives in git next to the other chart values) and the chart itself.
 #
 # Metrics: the chart's `trivy-operator` Service is scraped by the Prometheus in k8s/observability/
 # (job "trivy-operator" in config/prometheus.yml) and drawn by the "Trivy Security" Grafana
@@ -16,10 +13,12 @@ kind: Application
 metadata:
   name: trivy-operator
   namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
 spec:
   project: default
   sources:
-    - repoURL: https://github.com/miqui/k8s-fastapi-o2.git
+    - repoURL: https://github.com/miqui/gke-fastapi-o2.git
       targetRevision: main
       ref: values
     - repoURL: https://aquasecurity.github.io/helm-charts/

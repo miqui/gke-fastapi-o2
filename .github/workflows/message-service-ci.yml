@@ -25,9 +25,22 @@ on:
       - ".github/workflows/message-service-ci.yml"
   workflow_dispatch: {}
 
+# Image: us-central1-docker.pkg.dev/<project>/api-images/rest-message-api (Artifact Registry).
+# Pushing authenticates keylessly: GitHub's OIDC token is exchanged through Workload Identity
+# Federation for a short-lived token of the ci-pusher service account, which can only write to
+# that one repository. The federation provider only accepts tokens for this repo's main branch,
+# so pull requests (which never push) can't obtain it either. Set up by gke-deploy.sh, which
+# prints the two repository variables below.
+env:
+  REGISTRY: us-central1-docker.pkg.dev
+  IMAGE: us-central1-docker.pkg.dev/k8s-dev-412419/api-images/rest-message-api
+
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write  # OIDC token for Workload Identity Federation
     # The integration tests run the real Alembic migration against a real Postgres (Hazelcast is
     # faked). DB_* match the defaults in app/settings.py.
     services:
@@ -65,20 +78,26 @@ jobs:
       - name: Test
         run: uv run pytest
 
-      - name: Set up QEMU
-        if: github.event_name != 'pull_request'
-        uses: docker/setup-qemu-action@v3
-
       - name: Set up Docker Buildx
         if: github.event_name != 'pull_request'
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to Docker Hub
+      - name: Authenticate to Google Cloud
+        if: github.event_name != 'pull_request'
+        id: gcp
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_CI_SA }}
+          token_format: access_token
+
+      - name: Log in to Artifact Registry
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ${{ env.REGISTRY }}
+          username: oauth2accesstoken
+          password: ${{ steps.gcp.outputs.access_token }}
 
       # <UTC yyyymmddHHMMSS>-<7-char sha>: sorts lexically by build time (Argo CD Image Updater's
       # "alphabetical" strategy picks the highest tag) while still identifying the commit.
@@ -87,6 +106,7 @@ jobs:
         id: meta
         run: echo "tag=$(date -u +%Y%m%d%H%M%S)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
+      # amd64 only: GKE's e2 nodes are x86_64.
       - name: Build and push
         if: github.event_name != 'pull_request'
         uses: docker/build-push-action@v6
@@ -94,9 +114,9 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           tags: |
-            docker.io/miqui/rest-message-api:${{ steps.meta.outputs.tag }}
-            docker.io/miqui/rest-message-api:latest
+            ${{ env.IMAGE }}:${{ steps.meta.outputs.tag }}
+            ${{ env.IMAGE }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max

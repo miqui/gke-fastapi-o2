@@ -29,7 +29,7 @@ export const options = {
 // 200-299 and 409 are expected here; anything else (5xx, 404, 400) counts as failed.
 http.setResponseCallback(http.expectedStatuses({ min: 200, max: 299 }, 409));
 
-const BASE_URL = __ENV.BASE_URL || 'http://localhost';
+const BASE_URL = __ENV.BASE_URL || 'https://api.miqui.dev';
 const jsonHeaders = { 'Content-Type': 'application/json', 'Accept': 'application/json' };
 
 const successfulIncrements = new Counter('successful_increments');

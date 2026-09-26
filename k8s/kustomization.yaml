@@ -3,19 +3,19 @@ kind: Kustomization
 
 resources:
   - resourcequota.yaml
-  - secret.yaml
+  - networkpolicies.yaml
+  - external-secret.yaml
   - configmap.yaml
-  - postgres-statefulset.yaml
-  - postgres-service.yaml
+  - postgres.yaml
   - hazelcast-jmx-exporter-configmap.yaml
   - hazelcast-deployment.yaml
   - hazelcast-service.yaml
   - deployment.yaml
   - hpa.yaml
   - service.yaml
-  - ingress.yaml
+  - gateway.yaml
 
 images:
   - name: message-service
-    newName: docker.io/miqui/rest-message-api
+    newName: us-central1-docker.pkg.dev/k8s-dev-412419/api-images/rest-message-api
     newTag: latest

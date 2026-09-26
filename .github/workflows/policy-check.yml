@@ -30,10 +30,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Pinned to the Kyverno version deploy-kind.sh installs (chart 3.9.1 = Kyverno v1.19.1), so
-      # CI evaluates policies the way the cluster does. Bump the two together. The SHA-256 is from
-      # the release's checksums.txt. kubectl (used for `kubectl kustomize`) is preinstalled on
-      # GitHub's ubuntu runners.
+      # Pinned to the Kyverno version the cluster runs (k8s/argocd/apps/kyverno.yaml: chart 3.9.1
+      # = Kyverno v1.19.1), so CI evaluates policies the way the cluster does. Bump the two
+      # together. The SHA-256 is from the release's checksums.txt. kubectl (used for
+      # `kubectl kustomize`) is preinstalled on GitHub's ubuntu runners.
       - name: Install Kyverno CLI
         env:
           KYVERNO_VERSION: v1.19.1

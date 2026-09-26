@@ -14,8 +14,6 @@ spec:
       labels:
         app: message-service
     spec:
-      nodeSelector:
-        workload: api
       securityContext:
         # runAsUser is set explicitly as well as runAsNonRoot: 10001 is the image's numeric `app`
         # uid/gid (see the Dockerfile), which is what lets the kubelet verify it's non-root. It is
@@ -48,12 +46,21 @@ spec:
                 name: message-service-config
             - secretRef:
                 name: postgres-credentials
+          env:
+            # Cloud SQL private IP, from the Secret Crossplane writes for the PostgresInstance
+            # (k8s/postgres.yaml). Until that exists the pod shows CreateContainerConfigError
+            # and the kubelet keeps retrying.
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: cloudsql-connection
+                  key: privateIP
           command:
             - sh
             - -c
             - |
               until pg_isready -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER"; do
-                echo "Waiting for postgres at $DB_HOST:$DB_PORT..."
+                echo "Waiting for Cloud SQL at $DB_HOST:$DB_PORT..."
                 sleep 2
               done
         - name: wait-for-hazelcast
@@ -104,6 +111,12 @@ spec:
             - secretRef:
                 name: postgres-credentials
           env:
+            # Cloud SQL private IP, see the wait-for-postgres init container.
+            - name: DB_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: cloudsql-connection
+                  key: privateIP
             - name: POD_NAME
               valueFrom:
                 fieldRef:

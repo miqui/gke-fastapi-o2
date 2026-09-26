@@ -32,7 +32,7 @@ async def seed_initial_message() -> None:
         session.add(
             Message(
                 title="Welcome to the Kubernetes REST API",
-                content="A sample message backed by FastAPI and PostgreSQL on a kind cluster.",
+                content="A sample message backed by FastAPI and Cloud SQL for PostgreSQL on GKE.",
                 author_id=author_id,
             )
         )
