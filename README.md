@@ -13,6 +13,9 @@ Secrets, Kyverno, Trivy and the full observability stack - is the platform this 
 [NEW-PROJECT-BLUEPRINT.md](NEW-PROJECT-BLUEPRINT.md) describes the contracts an application must
 satisfy for that platform to keep working.
 
+The move from the earlier local cluster to GKE - decisions, and every problem hit during the first
+deployment with its fix - is recorded in [MIGRATE-TO-GKE.md](MIGRATE-TO-GKE.md).
+
 The cluster is meant to be **short-lived**: create it for an experiment, tear it down after a few
 hours, recreate it for the next one. Everything slow or stateful that doesn't need to die with it
 (images, TLS certificate, secrets, service accounts) lives outside it and is reused - see
