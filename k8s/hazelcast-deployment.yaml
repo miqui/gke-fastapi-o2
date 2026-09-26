@@ -80,13 +80,17 @@ spec:
             limits:
               cpu: "500m"
               memory: "512Mi"
+          # JVM + JMX agent startup under the 500m CPU limit takes ~50-60s on an e2 node, and the
+          # health endpoint answers slowly while it does: the default 1s timeout with a 65s budget
+          # got the pod killed (exit 143) mid-start on GKE. 3s timeout, up to 2 minutes.
           startupProbe:
             httpGet:
               path: /hazelcast/health/node-state
               port: 5701
-            initialDelaySeconds: 5
+            initialDelaySeconds: 10
             periodSeconds: 5
-            failureThreshold: 12
+            timeoutSeconds: 3
+            failureThreshold: 24
           readinessProbe:
             httpGet:
               path: /hazelcast/health/ready
