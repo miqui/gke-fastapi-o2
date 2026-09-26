@@ -164,7 +164,7 @@ Numbered in the order they were hit. "Commit" is the fix in this repo's history.
 | Image Updater | Read Artifact Registry via Workload Identity; set `fastapi-o2` to the CI tag without a git commit; the root Application didn't revert it |
 | External Secrets | All ExternalSecrets `SecretSynced` from Secret Manager |
 | Crossplane | `PostgresInstance` -> Cloud SQL `messagedb-7f1cf2ff6e77`, private IP `10.16.0.3`, database + user; migrations ran over TLS |
-| API | `test-api.sh` 12/12 through a port-forward, against Cloud SQL + Hazelcast (before problem 12; re-run after its fix pending the new image's rollout) |
+| API | `test-api.sh` 12/12 through a port-forward, against Cloud SQL + Hazelcast (before problem 12, and again after its fix - image `20260926183719-c240798`, rolled out by Image Updater) |
 | Gateway | `Programmed=True` on `34.149.147.124`; HTTP answers `301 -> https://` |
 | Tools | Argo CD, Grafana, Prometheus, OpenObserve, Headlamp all 200 through `gke-port-forward.sh` |
 | Kyverno | Enforce set passes on `k8s/`; self-test fixture rejected (locally and in CI) |
