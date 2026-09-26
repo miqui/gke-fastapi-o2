@@ -1,0 +1,156 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: message-service
+  labels:
+    app: message-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: message-service
+  template:
+    metadata:
+      labels:
+        app: message-service
+    spec:
+      nodeSelector:
+        workload: api
+      securityContext:
+        # runAsUser is set explicitly as well as runAsNonRoot: 10001 is the image's numeric `app`
+        # uid/gid (see the Dockerfile), which is what lets the kubelet verify it's non-root. It is
+        # above 10000 so it can't collide with a host user (Trivy KSV-0020/KSV-0021).
+        # The container-level securityContexts below (no privilege escalation, no capabilities)
+        # are what the Kyverno policies in k8s/policies/ require; readOnlyRootFilesystem is for
+        # Trivy KSV-0014.
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
+          envFrom:
+            - configMapRef:
+                name: message-service-config
+            - secretRef:
+                name: postgres-credentials
+          command:
+            - sh
+            - -c
+            - |
+              until pg_isready -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER"; do
+                echo "Waiting for postgres at $DB_HOST:$DB_PORT..."
+                sleep 2
+              done
+        - name: wait-for-hazelcast
+          image: busybox:1.36
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: "10m"
+              memory: "16Mi"
+            limits:
+              cpu: "100m"
+              memory: "64Mi"
+          envFrom:
+            - configMapRef:
+                name: message-service-config
+          command:
+            - sh
+            - -c
+            - |
+              until nc -z "$HAZELCAST_HOST" "$HAZELCAST_PORT"; do
+                echo "Waiting for hazelcast at $HAZELCAST_HOST:$HAZELCAST_PORT..."
+                sleep 2
+              done
+      containers:
+        - name: message-service
+          image: message-service:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          # The root filesystem is read-only; /tmp is the one writable path, for anything that
+          # reaches for tempfile.
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+          ports:
+            - containerPort: 8080
+              name: http
+          envFrom:
+            - configMapRef:
+                name: message-service-config
+            - secretRef:
+                name: postgres-credentials
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "256Mi"
+            limits:
+              cpu: "1000m"
+              memory: "512Mi"
+          startupProbe:
+            httpGet:
+              path: /health/liveness
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 12
+          livenessProbe:
+            httpGet:
+              path: /health/liveness
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/readiness
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 2
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - message-service
+                topologyKey: "kubernetes.io/hostname"

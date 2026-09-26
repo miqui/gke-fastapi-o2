@@ -1,0 +1,56 @@
+# ArgoCD Application syncing k8s/observability/ - the OTel Collector, Prometheus, Grafana (and its
+# dashboards), kube-state-metrics, node-exporter, the log collector, their RBAC, and the namespace
+# itself (see the kustomization there). Replaces the manual `kubectl apply -k k8s/observability/`
+# step in deploy-kind.sh, so a merged change to a dashboard or scrape config reaches the cluster
+# through the same GitOps flow as the API images instead of a hand-run kubectl apply. Same
+# pattern as policies-application.yaml; deploy-kind.sh registers it before creating this
+# namespace's secrets.
+#
+# Not covered here: OpenObserve and Headlamp (both installed with Helm by deploy-kind.sh, and
+# living in the same/another namespace untouched by this Application - Argo only prunes what it
+# tracks) and the Kyverno policies (their own Application).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: observability
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/miqui/k8s-fastapi-o2.git
+    targetRevision: main
+    path: k8s/observability
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: observability
+  syncPolicy:
+    automated:
+      # prune: objects deleted from git (including the previous hash-named ConfigMaps, see the
+      # configMapGenerator in the kustomization) are removed. selfHeal: a hand-edited object -
+      # e.g. a `kubectl apply` of a dashboard from an unmerged branch - is put back to what's on
+      # main. The Namespace opts out of pruning, see namespace.yaml.
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # Same as the fastapi-o2 Application: without this, ignoreDifferences below
+      # only suppresses drift *detection*, and every sync would still overwrite the real
+      # credentials with the committed placeholders.
+      - RespectIgnoreDifferences=true
+  # grafana-credentials and openobserve-remote-write-credentials are committed placeholders
+  # (grafana-secret.yaml, openobserve-prometheus-secret.yaml) that deploy-kind.sh overwrites
+  # in-cluster with 1Password-sourced values. Together with RespectIgnoreDifferences above,
+  # Argo leaves those Secrets' live values alone - same approach as postgres-credentials in
+  # application.yaml.
+  ignoreDifferences:
+    - group: ""
+      kind: Secret
+      name: grafana-credentials
+      jsonPointers:
+        - /data
+        - /stringData
+    - group: ""
+      kind: Secret
+      name: openobserve-remote-write-credentials
+      jsonPointers:
+        - /data
+        - /stringData

@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: message-service-config
+  labels:
+    app: message-service
+data:
+  DB_HOST: "postgres"
+  DB_PORT: "5432"
+  DB_NAME: "messagedb"
+  OTEL_METRICS_URL: "http://otel-collector.observability.svc.cluster.local:4318/v1/metrics"
+  OTEL_TRACES_URL: "http://otel-collector.observability.svc.cluster.local:4318/v1/traces"
+  # Sample 10% of new traces (children follow their parent's decision) - a k6 run
+  # otherwise floods OpenObserve's 5Gi PVC. Raise to 1.0 temporarily when debugging.
+  OTEL_TRACES_SAMPLER: "parentbased_traceidratio"
+  OTEL_TRACES_SAMPLER_ARG: "0.1"
+  HAZELCAST_HOST: "hazelcast"
+  HAZELCAST_PORT: "5701"
+  # /docs, /redoc and /openapi.json are only served when this is exactly "true" (anything other
+  # than "true"/"false" fails startup - see app/settings.py). Fine for this disposable dev
+  # cluster; leave it off anywhere real.
+  API_DOCS_ENABLED: "true"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: postgres-config
+  labels:
+    app: postgres
+data:
+  POSTGRES_DB: "messagedb"

@@ -1,0 +1,25 @@
+# Exposes the ArgoCD UI at http://argocd.localhost/, matching the *.localhost pattern already
+# used for Grafana/OpenObserve/Headlamp. argocd-server is patched with --insecure in
+# deploy-kind.sh so it serves plain HTTP on its "http" service port instead of redirecting to
+# HTTPS - simplest option for this disposable local cluster, same trust level as the other
+# dashboards exposed the same way.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: argocd-server
+  namespace: argocd
+  labels:
+    app: argocd-server
+spec:
+  ingressClassName: nginx
+  rules:
+    - host: argocd.localhost
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: argocd-server
+                port:
+                  name: http

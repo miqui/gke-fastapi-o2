@@ -1,0 +1,38 @@
+# ArgoCD Application syncing k8s/ (Postgres, Hazelcast, message-service, Ingress,
+# ResourceQuota - everything k8s/kustomization.yaml produces) - replaces the manual
+# `kubectl apply -k k8s/` step in deploy-kind.sh. Which image tag message-service
+# runs is decided by Argo CD Image Updater, configured in image-updater.yaml alongside this file.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: fastapi-o2
+  namespace: argocd
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/miqui/k8s-fastapi-o2.git
+    targetRevision: main
+    path: k8s
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: default
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      # Without this, ignoreDifferences below only suppresses drift *detection*; every sync (e.g.
+      # one triggered by Image Updater changing an image) still applies the full manifest and
+      # overwrites the real postgres-credentials with the committed placeholder.
+      - RespectIgnoreDifferences=true
+  # postgres-credentials is a committed placeholder in k8s/secret.yaml that deploy-kind.sh
+  # immediately overwrites in-cluster with real 1Password-sourced values. Together with
+  # RespectIgnoreDifferences above, ArgoCD leaves that Secret's live values alone - see the
+  # README's ArgoCD section for the full explanation.
+  ignoreDifferences:
+    - group: ""
+      kind: Secret
+      name: postgres-credentials
+      jsonPointers:
+        - /data
+        - /stringData

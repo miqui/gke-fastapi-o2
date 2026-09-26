@@ -1,0 +1,102 @@
+name: message-service CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "migrations/**"
+      - "tests/**"
+      - "alembic.ini"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "Dockerfile"
+      - ".github/workflows/message-service-ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "app/**"
+      - "migrations/**"
+      - "tests/**"
+      - "alembic.ini"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "Dockerfile"
+      - ".github/workflows/message-service-ci.yml"
+  workflow_dispatch: {}
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    # The integration tests run the real Alembic migration against a real Postgres (Hazelcast is
+    # faked). DB_* match the defaults in app/settings.py.
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: message_app
+          POSTGRES_PASSWORD: message_app
+          POSTGRES_DB: messagedb_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U message_app"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Lint
+        run: uv run ruff check
+
+      - name: Type check
+        run: uv run pyright
+
+      - name: Test
+        run: uv run pytest
+
+      - name: Set up QEMU
+        if: github.event_name != 'pull_request'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        if: github.event_name != 'pull_request'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # <UTC yyyymmddHHMMSS>-<7-char sha>: sorts lexically by build time (Argo CD Image Updater's
+      # "alphabetical" strategy picks the highest tag) while still identifying the commit.
+      - name: Compute image tag
+        if: github.event_name != 'pull_request'
+        id: meta
+        run: echo "tag=$(date -u +%Y%m%d%H%M%S)-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        if: github.event_name != 'pull_request'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: |
+            docker.io/miqui/rest-message-api:${{ steps.meta.outputs.tag }}
+            docker.io/miqui/rest-message-api:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

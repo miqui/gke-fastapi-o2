@@ -1,0 +1,41 @@
+# Values for the `aqua/trivy-operator` chart (https://github.com/aquasecurity/trivy-operator -
+# continuously scans the cluster and stores the results as CRDs: VulnerabilityReports,
+# ConfigAuditReports, RbacAssessmentReports, InfraAssessmentReports, ExposedSecretReports and
+# ClusterComplianceReports). Not installed by deploy-kind.sh directly: the Argo CD Application in
+# k8s/argocd/trivy-operator-application.yaml renders the chart with this file (multi-source,
+# `$values` ref), so a merged change here reaches the cluster through Argo. See TRIVY.md.
+#
+# Only chart defaults that matter for this cluster are overridden; everything else (all six
+# scanners on, the default low-cardinality metrics set) is left alone on purpose.
+
+# Same node group as the rest of the observability tooling (see k8s/kind-config.yaml).
+nodeSelector:
+  workload: observability
+
+# kind's own system namespaces: images this repo doesn't choose or control, so their findings
+# are noise on the dashboard. Everything else (default, observability, headlamp, argocd,
+# kyverno, ingress-nginx, trivy-system itself) is scanned.
+excludeNamespaces: "kube-system,local-path-storage"
+
+operator:
+  # Chart default is 10. The first pass scans every workload in the cluster at once; on a kind
+  # cluster inside the Docker Desktop VM that many parallel jobs competes with the API/DB pods.
+  scanJobsConcurrentLimit: 3
+  # One Trivy server (below) holds the vulnerability DB and every scan job asks it, instead of
+  # each Standalone job downloading the ~80MB DB from mirror.gcr.io on its own. Sets
+  # trivy.mode=ClientServer and the server URL for us.
+  builtInTrivyServer: true
+
+trivyOperator:
+  # Scan jobs (and so their image pulls and CPU) stay on the observability node too. The
+  # node-collector job ignores this - it has to run on each node it inspects
+  # (nodeCollector.useNodeSelector).
+  scanJobNodeSelector:
+    workload: observability
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi

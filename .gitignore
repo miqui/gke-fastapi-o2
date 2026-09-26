@@ -1,0 +1,25 @@
+kubeconfig.yml
+
+# 1Password / Environment Variables
+.env
+.env.*
+!.env.example
+
+### Claude Code ###
+.claude/
+
+### Python ###
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+### IntelliJ IDEA ###
+.idea
+*.iws
+*.iml
+*.ipr
+
+### VS Code ###
+.vscode/

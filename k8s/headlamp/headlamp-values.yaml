@@ -1,0 +1,43 @@
+# Values for the `headlamp/headlamp` chart (https://headlamp.dev/ - general-purpose
+# Kubernetes web UI, not tied to the message-service metrics stack). Installed with:
+#   helm upgrade --install headlamp headlamp/headlamp \
+#     --version 0.45.0 --namespace headlamp --create-namespace \
+#     -f k8s/headlamp/headlamp-values.yaml
+#
+# No custom auth is configured (no OIDC), so the login page needs a bearer token for
+# whichever identity you want to browse as. The chart's default ClusterRoleBinding
+# grants its own "headlamp" ServiceAccount cluster-admin, so the simplest local token is:
+#   kubectl create token headlamp -n headlamp --duration=24h
+# That's cluster-admin in the browser - acceptable for this disposable local kind
+# cluster only (same caveat as the plaintext defaults in k8s/secret.yaml and
+# k8s/observability/grafana-secret.yaml); do not reuse this setup anywhere shared.
+
+nodeSelector:
+  workload: observability
+
+config:
+  # The chart bundles the official Prometheus plugin (headlamp-k8s/plugins/prometheus, "Show
+  # Prometheus metrics" charts on workload detail pages) inside its image; this just keeps it
+  # served (chart default, spelled out here for visibility). The plugin auto-detects Prometheus
+  # in-cluster via the `headlamp-prometheus=true` label on k8s/observability/prometheus-service.yaml
+  # - no separate Prometheus install or per-plugin config needed.
+  staticPlugins:
+    enabled: true
+
+resources:
+  requests:
+    cpu: "50m"
+    memory: "128Mi"
+  limits:
+    cpu: "250m"
+    memory: "256Mi"
+
+ingress:
+  enabled: true
+  ingressClassName: "nginx"
+  hosts:
+    - host: headlamp.localhost
+      paths:
+        - path: /
+          type: Prefix
+  tls: []

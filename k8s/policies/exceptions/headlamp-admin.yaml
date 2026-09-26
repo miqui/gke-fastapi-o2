@@ -1,0 +1,15 @@
+# The Headlamp chart binds its ServiceAccount to cluster-admin (see
+# k8s/headlamp/headlamp-values.yaml for why that's accepted on this disposable local cluster).
+apiVersion: policies.kyverno.io/v1
+kind: PolicyException
+metadata:
+  name: headlamp-admin
+  namespace: kyverno
+spec:
+  policyRefs:
+    - name: restrict-cluster-admin-bindings
+      kind: ValidatingPolicy
+  matchConditions:
+    - name: headlamp-admin-binding
+      expression: "object.metadata.name == 'headlamp-admin'"
+  reportResult: skip
