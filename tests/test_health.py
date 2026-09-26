@@ -1,12 +1,41 @@
 import httpx
 import pytest
 
+from app.cache import HazelcastCache
 from app.settings import Settings
 from app.state import state
 
 
-async def test_liveness_is_always_up(client: httpx.AsyncClient) -> None:
+async def test_liveness_is_up_before_startup_completes(client: httpx.AsyncClient) -> None:
     response = await client.get("/health/liveness")
+    assert response.status_code == 200
+    assert response.json() == {"status": "UP"}
+
+
+async def test_liveness_is_down_once_ready_if_the_cache_client_has_shut_down(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A Hazelcast client that exhausted cluster_connect_timeout shuts itself down for good; only a
+    # container restart recovers, so liveness must fail (see app/routers/health.py).
+    monkeypatch.setattr(HazelcastCache, "connected", property(lambda self: False))
+    state.ready = True
+    try:
+        response = await client.get("/health/liveness")
+    finally:
+        state.ready = False
+    assert response.status_code == 503
+    assert response.json()["status"] == "DOWN"
+
+
+async def test_liveness_is_up_once_ready_while_the_cache_client_runs(
+    client: httpx.AsyncClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(HazelcastCache, "connected", property(lambda self: True))
+    state.ready = True
+    try:
+        response = await client.get("/health/liveness")
+    finally:
+        state.ready = False
     assert response.status_code == 200
     assert response.json() == {"status": "UP"}
 
