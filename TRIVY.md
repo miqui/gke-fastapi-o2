@@ -4,25 +4,25 @@
 stores the results as Kubernetes objects: every workload's images are scanned for CVEs and
 baked-in secrets, and workloads, Services, Ingresses, Roles etc. are checked for misconfigurations.
 Summary counts are exported as Prometheus metrics and drawn by the **Trivy Security** Grafana
-dashboard (<http://grafana.localhost/d/trivy-security>). Every command below was run against the
+dashboard (<http://localhost:3000/d/trivy-security> via `./gke-port-forward.sh`). Every command below was run against the
 live cluster.
 
 ## How it's installed
 
 | Piece | Where |
 | --- | --- |
-| Argo CD Application `trivy-operator` | `k8s/argocd/trivy-operator-application.yaml` — upstream Helm chart `aqua/trivy-operator` **0.36.0** (operator v0.34.0, Trivy 0.74.0) |
+| Argo CD Application `trivy-operator` | `k8s/argocd/apps/trivy-operator.yaml` (sync wave -1) — upstream Helm chart `aqua/trivy-operator` **0.36.0** (operator v0.34.0, Trivy 0.74.0) |
 | Chart values | `k8s/trivy-operator/trivy-operator-values.yaml`, pulled from `main` via a `$values` ref |
-| Registration | `deploy-kind.sh` step 5e (`kubectl apply` + wait for Synced) |
+| Registration | the `root` Application (app of apps), like every other component |
 | Metrics scrape | job `trivy-operator` in `k8s/observability/config/prometheus.yml` |
 | Dashboard | `trivy-security.json` in `k8s/observability/grafana-dashboard-json-configmap.yaml` |
 
-Everything runs in the `trivy-system` namespace (created by Argo, `CreateNamespace=true`), on the
-`workload=observability` node: the operator, the `trivy-server` StatefulSet, and the scan jobs.
-The exception is the `node-collector` job, which has to run on each node it inspects.
+Everything runs in the `trivy-system` namespace (created by Argo, `CreateNamespace=true`): the
+operator, the `trivy-server` StatefulSet, and the scan jobs, scheduled wherever there's room. The
+`node-collector` job runs on each node it inspects.
 
-Unlike Kyverno/OpenObserve/Headlamp (Helm installs run by `deploy-kind.sh`), Argo owns this chart
-end to end: bump `targetRevision` or edit the values file, merge, and Argo rolls it out.
+Like every component here, Argo owns this chart end to end: bump `targetRevision` or edit the
+values file, merge, and Argo rolls it out.
 
 ### Choices worth knowing
 
@@ -33,10 +33,10 @@ end to end: bump `targetRevision` or edit the values file, merge, and Argo rolls
   the misconfiguration/RBAC/compliance reports). Override them with `trivy.dbRegistry`/`dbRepository`,
   `trivy.javaDb*` and `policiesBundle.*` for a mirror.
 - **`scanJobsConcurrentLimit: 3`** (chart default 10) so the first full-cluster pass doesn't starve
-  the API/DB pods on Docker Desktop. That first pass takes a few minutes.
-- **`excludeNamespaces: kube-system,local-path-storage`**: kind's own images are noise. The cost is
-  that `InfraAssessmentReports`, which cover the control-plane pods in `kube-system`, are never
-  produced. Node checks still run as `ClusterInfraAssessmentReports`, but the operator exports no
+  the API pods on a 3-node cluster. That first pass takes a few minutes.
+- **`excludeNamespaces: kube-system,gke-managed-system,gke-managed-cim,gmp-public`**: GKE's own
+  images are noise (and not ours to fix). The cost is that `InfraAssessmentReports` for pods in
+  `kube-system` are never produced (GKE's control plane isn't in the cluster anyway). Node checks still run as `ClusterInfraAssessmentReports`, but the operator exports no
   metric for them, so they're kubectl-only (below).
 - **Default low-cardinality metrics.** The per-CVE-ID metric (`metricsVulnIdEnabled`) and the
   `*Info` metrics are off, so the dashboard shows counts, not CVE IDs. Use the reports for detail.

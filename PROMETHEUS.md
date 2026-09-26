@@ -49,9 +49,9 @@ enough to unstick an already-overflowed instance.
 
 **Result (confirmed live):** every write request returned HTTP 200, `prometheus_remote_storage_samples_failed_total` stopped climbing.
 
-## 3. Widened scope to add kind cluster ops metrics (`node-exporter`, `kube-state-metrics`)
+## 3. Widened scope to add cluster ops metrics (`node-exporter`, `kube-state-metrics`)
 
-Requested: forward the same cluster-ops metrics the existing "kind cluster ops" Grafana dashboard
+Requested: forward the same cluster-ops metrics the existing "Cluster ops" Grafana dashboard
 already uses. Added these two jobs to the keep regex — done first, before the higher-cardinality
 `kubernetes-nodes-cadvisor`, to verify no overflow incrementally. (OpenObserve's `resources` were
 bumped in `openobserve-values.yaml` in the same step, in anticipation of the added volume.)

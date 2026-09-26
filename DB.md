@@ -2,36 +2,43 @@
 
 Sample SQL for poking at the database directly — useful when an API response looks wrong and you
 want to check what's actually in Postgres, bypassing the API (and the Hazelcast cache) entirely.
-`messagedb` belongs to message-service and lives on the `postgres` StatefulSet
-(see [README.md](README.md#architecture)).
+`messagedb` belongs to message-service and lives on a Cloud SQL for PostgreSQL instance provisioned
+by Crossplane (see [README.md](README.md#architecture)).
 
 ## Connecting
 
-Port-forward the cluster's Postgres to your machine first:
+The instance has **no public IP** - only its private IP inside the VPC - so there's nothing to
+port-forward to directly, and the `default` namespace's NetworkPolicies only let the app and
+postgres-exporter reach it. Use a throwaway pod in a namespace of its own (no NetworkPolicies, not
+covered by the Kyverno enforce policies), and delete the namespace afterwards:
 
 ```bash
-kubectl port-forward svc/postgres 5433:5432
+DB_IP=$(kubectl get secret cloudsql-connection -o jsonpath='{.data.privateIP}' | base64 -d)
+kubectl create namespace db-shell
+
+# psql prompts for the password - it never ends up in a pod spec that `view` users can read.
+# Print it (then paste at the prompt) with:
+#   kubectl get secret postgres-credentials -o jsonpath='{.data.DB_PASSWORD}' | base64 -d; echo
+kubectl run psql -n db-shell --rm -it --restart=Never --image=postgres:16-alpine -- \
+  psql "host=$DB_IP port=5432 dbname=messagedb user=message_app sslmode=require"
+
+kubectl delete namespace db-shell
 ```
 
-Then, credentials for the bootstrap user (owns `messagedb`, which the postgres image creates from
-`POSTGRES_DB` — see `k8s/configmap.yaml`):
+**DataGrip / other local clients** - relay through a pod, then port-forward to it:
 
 ```bash
-DB_USER=$(kubectl get secret postgres-credentials -o jsonpath='{.data.DB_USER}' | base64 -d)
-DB_PASSWORD=$(kubectl get secret postgres-credentials -o jsonpath='{.data.DB_PASSWORD}' | base64 -d)
+kubectl run pg-relay -n db-shell --restart=Never --image=alpine/socat -- \
+  tcp-listen:5432,fork,reuseaddr "tcp-connect:$DB_IP:5432"
+kubectl port-forward -n db-shell pod/pg-relay 5433:5432
 ```
 
-**psql**:
-
-```bash
-PGPASSWORD="$DB_PASSWORD" psql -h localhost -p 5433 -U "$DB_USER" -d messagedb
+```
+jdbc:postgresql://localhost:5433/messagedb?sslmode=require      # user message_app
 ```
 
-**DataGrip / other JDBC clients** — point the connection URL at the database:
-
-```
-jdbc:postgresql://localhost:5433/messagedb
-```
+(TLS is required - the instance is `ENCRYPTED_ONLY`. `sslmode=require` encrypts without verifying
+the server certificate; the server CA is in the `cloudsql-connection` Secret for `verify-ca`.)
 
 ---
 

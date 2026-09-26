@@ -1,9 +1,10 @@
 # kubectl Commands — Debugging Kyverno Policies and Audits
 
 A cheat sheet for answering "why was this denied?", "why is this flagged?" and "is Kyverno even
-working?" on the kind cluster. Design and rationale live in the README's
+working?" on the GKE dev cluster. Design and rationale live in the README's
 [Policy as Code with Kyverno](README.md#policy-as-code-with-kyverno) section; this file is only
-commands. Every command here was run against the live cluster.
+commands. The commands were first run against the earlier local cluster; they're plain `kubectl`
+and apply unchanged on GKE.
 
 Needs `kubectl`, and `jq` for the report queries. Policy objects are cluster-scoped
 (`ValidatingPolicy`); exceptions live in the `kyverno` namespace.

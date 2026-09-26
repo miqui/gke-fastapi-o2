@@ -19,7 +19,7 @@ depends_on: str | Sequence[str] | None = None
 
 def upgrade() -> None:
     # postgres_exporter's --collector.stat_statements and the "PostgreSQL Ops & Queries" Grafana
-    # dashboard need it (k8s/postgres-statefulset.yaml preloads the library).
+    # dashboard need it (Cloud SQL preloads the library).
     op.execute("CREATE EXTENSION IF NOT EXISTS pg_stat_statements")
 
     op.create_table(

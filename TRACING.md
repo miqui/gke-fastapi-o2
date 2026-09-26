@@ -94,14 +94,13 @@ service:
 ```
 
 - The `otlphttp` exporter appends `/v1/traces` itself, unlike the services' exporter (above).
-- `OPENOBSERVE_PASSWORD` comes from `secretKeyRef` in `otel-collector-deployment.yaml`, pointing at
-  the existing `openobserve-remote-write-credentials` Secret (key `password`) that Prometheus'
-  `remote_write` already uses — so the password stays out of the ConfigMap, and there is one
-  place to rotate it. The username is hard-coded, same as in `config/prometheus.yml`.
-- The Secret in the repo (`openobserve-prometheus-secret.yaml`) holds a placeholder password;
-  `deploy-kind.sh` creates the real one. Don't `kubectl apply` the placeholder file over a live cluster.
-- Changing the collector ConfigMap needs a restart: `kubectl rollout restart deploy/otel-collector -n observability`
-  (a plain `apply` of the ConfigMap alone is not picked up by the running pod).
+- `OPENOBSERVE_USER` / `OPENOBSERVE_PASSWORD` come from `secretKeyRef` in
+  `otel-collector-deployment.yaml`, pointing at the `openobserve-remote-write-credentials` Secret
+  (keys `username`, `password`) that Prometheus' `remote_write` also uses — built by External
+  Secrets from GCP Secret Manager, so the credentials stay out of the ConfigMap and there is one
+  place (1Password -> `gke-secrets-seed.sh`) to rotate them.
+- The collector ConfigMap is generated with a content hash (`configMapGenerator` in
+  `k8s/observability/kustomization.yaml`), so a merged config change rolls the collector by itself.
 
 ## Verification
 
@@ -117,7 +116,7 @@ curl -X POST localhost:14318/v1/traces -H 'Content-Type: application/json' -d '{
   "startTimeUnixNano":"1700000000000000000","endTimeUnixNano":"1700000000050000000"}]}]}]}'
 ```
 
-**Service → OpenObserve (verified live, 2026-09-23).** On a fresh kind cluster running the real
+**Service → OpenObserve (verified live, 2026-09-23, on the earlier local cluster).** Running the real
 image (3 to 6 replicas, `OTEL_TRACES_SAMPLER_ARG: "0.1"`), after running all five k6 scripts:
 
 - **The service arrived:** 14,365 spans for `service_name = message-service`.
@@ -148,8 +147,8 @@ To repeat the check:
 kubectl get pods -n default -l app=message-service
 
 # generate traffic (10% sampling), e.g. one of the k6 scripts, then:
-U=$(kubectl get secret openobserve -n observability -o jsonpath='{.data.ZO_ROOT_USER_EMAIL}' | base64 -d)
-P=$(kubectl get secret openobserve -n observability -o jsonpath='{.data.ZO_ROOT_USER_PASSWORD}' | base64 -d)
+U=$(kubectl get secret openobserve-root-credentials -n observability -o jsonpath='{.data.ZO_ROOT_USER_EMAIL}' | base64 -d)
+P=$(kubectl get secret openobserve-root-credentials -n observability -o jsonpath='{.data.ZO_ROOT_USER_PASSWORD}' | base64 -d)
 kubectl port-forward -n observability svc/openobserve 15080:5080 &
 END=$(python3 -c "import time;print(int(time.time()*1e6))"); START=$((END-3600000000))
 curl -s -u "$U:$P" -X POST "http://localhost:15080/api/default/_search?type=traces" \
@@ -158,7 +157,7 @@ curl -s -u "$U:$P" -X POST "http://localhost:15080/api/default/_search?type=trac
 ```
 
 Expect rows for the route-templated request spans and the SQL / `hazelcast.*` spans. Or open
-OpenObserve → Traces (`openobserve.localhost`).
+OpenObserve → Traces (`http://localhost:5080` via `./gke-port-forward.sh openobserve`).
 
 ## Gotchas
 
@@ -166,7 +165,7 @@ OpenObserve → Traces (`openobserve.localhost`).
   `default` stream even when spans are searchable (they are still in the in-memory table). Search
   instead of trusting the stat.
 - **ArgoCD `selfHeal` reverts hand edits** to `k8s/configmap.yaml` and the deployment, and the
-  service image comes from Docker Hub via Image Updater. To test a tracing change on the cluster it
+  service image comes from Artifact Registry via Image Updater. To test a tracing change on the cluster it
   has to be merged, or auto-sync paused.
 - **Nothing shows up?** In order: pods still on the old image; sampler ratio too low for the
   amount of traffic; `OTEL_TRACES_URL` missing `/v1/traces`; collector log for export errors

@@ -1,32 +1,38 @@
-# Message Service (FastAPI + SQLAlchemy + PostgreSQL on Kubernetes)
+# Message Service (FastAPI + SQLAlchemy + PostgreSQL on GKE)
 
 A REST API (Python 3.13, [FastAPI](https://fastapi.tiangolo.com/)) for `Message` and `Author`
-resources, persisting through [SQLAlchemy](https://www.sqlalchemy.org/) 2.0 (async) against a
-PostgreSQL database, with a Hazelcast read-through cache, deployed to a local
-[kind](https://kind.sigs.k8s.io/) cluster. The REST surface is documented in
-[API-DESIGN.md](API-DESIGN.md) and, when `API_DOCS_ENABLED=true`, served as OpenAPI at `/docs`.
+resources, persisting through [SQLAlchemy](https://www.sqlalchemy.org/) 2.0 (async) against
+PostgreSQL (Cloud SQL), with a Hazelcast read-through cache, deployed to a dev
+[GKE](https://cloud.google.com/kubernetes-engine) cluster in project `k8s-dev-412419`. The REST
+surface is documented in [API-DESIGN.md](API-DESIGN.md) and, when `API_DOCS_ENABLED=true`, served
+as OpenAPI at `/docs`.
 
-Everything below the application layer - PostgreSQL, the standalone Hazelcast cache member, the kind
-cluster topology, ingress, Argo CD, Kyverno and the full observability stack - is the platform this
-service runs on. [NEW-PROJECT-BLUEPRINT.md](NEW-PROJECT-BLUEPRINT.md) describes the contracts an
-application must satisfy for that platform to keep working.
+Everything below the application layer - Cloud SQL (provisioned by Crossplane), the standalone
+Hazelcast cache member, the GKE cluster and its network, the public Gateway, Argo CD, External
+Secrets, Kyverno, Trivy and the full observability stack - is the platform this service runs on.
+[NEW-PROJECT-BLUEPRINT.md](NEW-PROJECT-BLUEPRINT.md) describes the contracts an application must
+satisfy for that platform to keep working.
+
+The cluster is meant to be **short-lived**: create it for an experiment, tear it down after a few
+hours, recreate it for the next one. Everything slow or stateful that doesn't need to die with it
+(images, TLS certificate, secrets, service accounts) lives outside it and is reused - see
+[Deployment to GKE](#deployment-to-gke).
 
 ## Stack URLs
 
-Once `deploy-kind.sh` completes, the stack is reachable at (`*.localhost` resolves to `127.0.0.1`
-on macOS/most Linux out of the box - see [Deployment with Kind / Kubernetes](#deployment-with-kind--kubernetes)):
+Only the API is public. Every tool is reached through `./gke-port-forward.sh`, which tunnels
+through the GKE API server (locked to your IP + Google IAM) and binds on `127.0.0.1` only.
 
 | Component | URL | Notes |
 | --- | --- | --- |
-| message-service REST API | `http://localhost/messages`, `http://localhost/authors` | see [REST API](#rest-api) |
-| message-service API docs | `http://localhost/docs` | OpenAPI UI; only while `API_DOCS_ENABLED=true` (it is, in this dev cluster) |
-| message-service health | `http://localhost/health/liveness` | |
-| Grafana | `http://grafana.localhost/` | credentials via Secret / 1Password - see [Viewing metrics in Grafana](#viewing-metrics-in-grafana) |
-| OpenObserve | `http://openobserve.localhost/` | credentials via Secret / 1Password |
-| Headlamp | `http://headlamp.localhost/` | Kubernetes dashboard; login needs a bearer token, see [Headlamp](#viewing-metrics-in-grafana) |
-| ArgoCD | `http://argocd.localhost/` | GitOps sync UI; login is `admin` / see [Continuous Deployment with ArgoCD](#continuous-deployment-with-argocd) |
-| Prometheus | `http://localhost:9090` | not exposed via Ingress - `kubectl port-forward -n observability svc/prometheus 9090:9090` |
-
+| message-service REST API | `https://api.miqui.dev/messages`, `https://api.miqui.dev/authors` | public; see [REST API](#rest-api). **No authentication yet.** |
+| message-service API docs | `https://api.miqui.dev/docs` | OpenAPI UI; only while `API_DOCS_ENABLED=true` (it is, in this dev cluster) |
+| message-service health | `https://api.miqui.dev/health/liveness` | |
+| Argo CD | `https://localhost:8081` | port-forward; `admin` / see [Continuous Deployment with ArgoCD](#continuous-deployment-with-argocd) |
+| Grafana | `http://localhost:3000` | port-forward; credentials from Secret Manager - see [Viewing metrics in Grafana](#viewing-metrics-in-grafana) |
+| Prometheus | `http://localhost:9090` | port-forward; no login of its own, which is why it's never exposed |
+| OpenObserve | `http://localhost:5080` | port-forward; credentials from Secret Manager |
+| Headlamp | `http://localhost:4466` | port-forward; **read-only** token - see [Headlamp](#headlamp) |
 
 ## Architecture
 
@@ -41,26 +47,37 @@ on macOS/most Linux out of the box - see [Deployment with Kind / Kubernetes](#de
   by a Postgres advisory lock so three replicas starting together don't race (see the Dockerfile's
   `ENTRYPOINT` and `migrations/env.py`).
 
-- **Cluster topology** (`k8s/kind-config.yaml`): 1 control-plane + 6 workers.
-  - 2 workers labeled `workload=api` — the `message-service` Deployment (3 replicas) is pinned there
-    via `nodeSelector`, with preferred pod anti-affinity so replicas spread across those nodes. A
-    `HorizontalPodAutoscaler` (`k8s/hpa.yaml`) keeps it between 3 and 6 replicas, scaling on CPU
-    (70% average utilization) and memory (80%) against the container's `resources.requests` in
-    `k8s/deployment.yaml`. It reads usage from **metrics-server**, which `deploy-kind.sh` installs
-    with `--kubelet-insecure-tls` (kind's kubelet serving certs aren't signed for metrics-server's
-    default verification).
-  - 1 worker labeled `workload=db` — the `postgres` StatefulSet (1 replica, with a `PersistentVolumeClaim`)
-    is pinned there via `nodeSelector`.
-  - 1 worker labeled `workload=observability` — the OTel Collector, Prometheus, and Grafana
-    Deployments (see below) are pinned there via `nodeSelector`.
-  - 1 worker labeled `workload=cache` — the `hazelcast` Deployment (see below) is pinned there
-    via `nodeSelector`.
-  - 1 worker labeled `workload=openobserve` — the OpenObserve `StatefulSet` (see below) is pinned
-    there via `nodeSelector`.
-  - [Headlamp](https://headlamp.dev/) (a general-purpose Kubernetes web UI, own `headlamp`
-    namespace) is pinned to the `workload=observability` node too, alongside Grafana - it's a
-    lightweight single-pod dashboard with no metrics-pipeline role of its own, so it doesn't
-    warrant a dedicated node.
+- **Cluster** (`gke-deploy.sh`): zonal GKE Standard cluster `dev-cluster` in `us-central1-a`,
+  `e2-standard-2` nodes autoscaling 3-5, release channel `stable`.
+  - **Private nodes** (no external IPs), egress through Cloud NAT; the control plane only accepts
+    the operator's public IP (master authorized networks).
+  - **Dataplane V2**, so NetworkPolicies are enforced; **Workload Identity**, so in-cluster
+    controllers get Google credentials without key files; **Gateway API**; Shielded Nodes with
+    secure boot; GKE Managed Prometheus **off** (this repo runs its own Prometheus).
+  - Nodes run as a dedicated `gke-dev-nodes` service account with only
+    `roles/container.defaultNodeServiceAccount` plus read access to the one Artifact Registry repo -
+    not the default compute account, which has project Editor.
+  - No node pinning: the scheduler places everything. `message-service` keeps a preferred pod
+    anti-affinity so its replicas spread across nodes. A `HorizontalPodAutoscaler`
+    (`k8s/hpa.yaml`) keeps it between 3 and 6 replicas, scaling on CPU (70% average utilization) and
+    memory (80%) against the container's `resources.requests` in `k8s/deployment.yaml`; GKE ships
+    metrics-server, so nothing extra is installed for that.
+- **Database**: Cloud SQL for PostgreSQL 16, requested by the app as a `PostgresInstance`
+  (`k8s/postgres.yaml`) - a platform API defined in `k8s/platform/` (a Crossplane
+  `CompositeResourceDefinition` + `Composition`) that Crossplane turns into a Cloud SQL instance,
+  the `messagedb` database and the `message_app` user.
+  - **Private IP only** (no public IPv4), reached over Private Service Access (`10.16.0.0/20`,
+    peered by `gke-deploy.sh`); **TLS required** (`ENCRYPTED_ONLY`); `db-custom-1-3840` (100
+    connections - the shared-core tiers allow 25/50, fewer than the pods' pools at full HPA scale).
+  - **No automated backups, no point-in-time recovery, no deletion protection** - a deliberate
+    dev-cluster choice: `gke-teardown.sh` deletes the instance and its data.
+  - Each instance is named `messagedb-<random>`: Cloud SQL blocks reusing a deleted instance's name
+    for up to a week, and the cluster is rebuilt more often than that.
+  - The instance's private IP reaches the app through the `cloudsql-connection` Secret that
+    Crossplane writes (`DB_HOST` in `k8s/deployment.yaml`); the password is the same
+    `postgres-credentials` Secret Crossplane sets the Cloud SQL user's password from, so the two
+    can't drift. Crossplane authenticates to GCP as the `crossplane-gcp` service account via
+    Workload Identity (`k8s/platform/crossplane-runtime-config.yaml`).
 - **Lookup cache**: `GET /messages/{id}` reads through a `messages` map on a standalone
   [Hazelcast](https://github.com/hazelcast/hazelcast) member (`k8s/hazelcast-deployment.yaml`,
   `k8s/hazelcast-service.yaml`) that each `message-service` pod connects to as a **client**
@@ -78,46 +95,61 @@ on macOS/most Linux out of the box - see [Deployment with Kind / Kubernetes](#de
   which stays correct - see `app/cache.py`'s comments. Connecting to Hazelcast is not optional: same
   as the DB connection, a missing/unreachable member fails startup rather than silently running
   without a cache.
-- **Ingress**: the control-plane node is labeled `ingress-ready=true` and maps host ports 80/443
-  (see [kind's Ingress guide](https://kind.sigs.k8s.io/docs/user/ingress/)). `deploy-kind.sh` installs
-  the ingress-nginx controller, and `k8s/ingress.yaml` routes all paths to `message-service`
-  (a plain `ClusterIP` Service - no NodePort). The API is reachable at `http://localhost/messages`
-  with no port number and no `kubectl port-forward` needed. The API is served at `/`, so there's no
-  rewrite rule; a service added behind a path prefix would need its own `Ingress` (the
-  `rewrite-target` annotation applies to a whole Ingress object) and FastAPI's `root_path` set to
-  that prefix so the generated OpenAPI links are right.
+- **Public entry point** (`k8s/gateway.yaml`): a Gateway API `Gateway` of class
+  `gke-l7-global-external-managed` - a Google global external Application Load Balancer - serving
+  `https://api.miqui.dev` and routing everything to the `message-service` `ClusterIP` Service
+  (container-native: the LB sends straight to pod IPs). Plain HTTP only answers with a 301 to
+  HTTPS. The pieces it references by name are created by `gke-deploy.sh` outside the cluster so
+  they survive rebuilds:
+  - `api-ip`: global static IP, which the Cloudflare `A` record for `api.miqui.dev` points at;
+  - `api-cert-map`: Certificate Manager map holding a Google-managed certificate for
+    `api.miqui.dev`, validated by a DNS authorization (a `CNAME` in Cloudflare) - so it's issued
+    once, independently of any load balancer, and is valid the moment a new Gateway comes up;
+  - `api-tls`: SSL policy, `MODERN` profile, TLS 1.2 minimum.
+
+  The LB's own health check (`HealthCheckPolicy`) uses `/health/readiness`, so a draining pod leaves
+  the LB as well as the Service. The API is served at `/`; a service added behind a path prefix
+  would need its own `HTTPRoute` rule and FastAPI's `root_path` set to that prefix so the generated
+  OpenAPI links are right.
+- **Network policy**: `default` is default-deny in both directions (`k8s/networkpolicies.yaml`),
+  then one policy per workload: `message-service` accepts only the load balancer's ranges
+  (`35.191.0.0/16`, `130.211.0.0/22`) on 8080 and may only reach Hazelcast, Cloud SQL's range and
+  the OTel Collector; Hazelcast and postgres-exporter accept only their clients and Prometheus.
+  `observability` and `headlamp` are default-deny ingress. Kubelet probes and `kubectl
+  port-forward` aren't subject to NetworkPolicy, so neither needs a rule.
+- **Secrets**: nothing secret is committed or passed through a script into the cluster. The values
+  live in 1Password; `gke-secrets-seed.sh` copies them into **GCP Secret Manager**, and the
+  **External Secrets Operator** (authenticating as the `external-secrets` service account via
+  Workload Identity, allowed to read exactly those secrets) builds the Kubernetes Secrets from the
+  `ExternalSecret` manifests next to their consumers (`k8s/external-secret.yaml`,
+  `k8s/observability/externalsecrets.yaml`). The `gcp-secret-manager` `ClusterSecretStore`
+  (`k8s/platform/`) only serves the `default` and `observability` namespaces.
 
 - **Observability** (`k8s/observability/`, namespace `observability`): the app pushes metrics as OTLP
   (`opentelemetry-sdk` + `opentelemetry-exporter-otlp-proto-http`, see `app/telemetry.py`)
   to an **OpenTelemetry Collector** (`otel-collector`, `otel/opentelemetry-collector-contrib`), which
   re-exposes them in Prometheus format on port 8889. **Prometheus** scrapes the collector, and
   **Grafana** (provisioned with that Prometheus datasource and pre-built dashboards - request
-  rate/latency by route, event-loop lag, process memory, DB connection-pool stats) is exposed via
-  `k8s/observability/ingress.yaml` at `http://grafana.localhost/` (credentials configured via Secrets /
-  1Password, see `k8s/observability/grafana-secret.yaml`). `*.localhost` resolves to `127.0.0.1` on
-  modern OSes/browsers without any `/etc/hosts` change.
+  rate/latency by route, event-loop lag, process memory, DB connection-pool stats) is reached with
+  `./gke-port-forward.sh` at `http://localhost:3000` (credentials from Secret Manager, via the
+  `grafana-credentials` ExternalSecret).
 
 
   **OpenObserve** (`openobserve/openobserve-standalone` Helm chart - single-node, not the HA chart;
-  installed by `deploy-kind.sh`, values in `k8s/observability/openobserve-values.yaml`) is a second,
-  independent observability backend, fed by Prometheus `remote_write`. It's exposed at
-  `http://openobserve.localhost/` (credentials configured via Secrets / 1Password, see
-  `k8s/observability/openobserve-values.yaml` and `k8s/observability/openobserve-prometheus-secret.yaml`
-  - the latter is what Prometheus itself authenticates with, kept out of its ConfigMap on principle
-  even though this is all disposable local-kind-only). Query its data under the `default` org, stream
-  names matching the Prometheus metric names (e.g. `http_requests_total`,
+  its own Argo CD Application, values in `k8s/observability/openobserve-values.yaml`) is a second,
+  independent observability backend, fed by Prometheus `remote_write`, OTLP traces and pod logs. Its
+  root credentials come from the `openobserve-root-credentials` Secret (the chart's
+  `auth.existingRootUserSecret`), and Prometheus and both collectors log in with the same values
+  from `openobserve-remote-write-credentials` - kept out of their ConfigMaps. Query its data under
+  the `default` org, stream names matching the Prometheus metric names (e.g. `http_requests_total`,
   `container_memory_working_set_bytes`).
 
-  **[Headlamp](https://headlamp.dev/)** (`headlamp/headlamp` Helm chart, own `headlamp` namespace -
-  a general-purpose Kubernetes web UI, not part of the message-service metrics pipeline above;
-  installed by `deploy-kind.sh`, values in `k8s/headlamp/headlamp-values.yaml`) gives a
-  browse/inspect/edit view over every resource in the cluster (pods, deployments, logs, exec,
-  node status, etc.), which is a different job than Grafana/OpenObserve's time-series metrics. It's
-  exposed at `http://headlamp.localhost/`. No OIDC is configured, so the login page needs a bearer
-  token; the chart's default `ClusterRoleBinding` grants its own `headlamp` ServiceAccount
-  `cluster-admin`, so the simplest local token is `kubectl create token headlamp -n headlamp
-  --duration=24h` (that's cluster-admin in the browser - fine for this disposable local kind
-  cluster only, not a pattern to reuse anywhere shared).
+  **[Headlamp](https://headlamp.dev/)** (`headlamp/headlamp` Helm chart, own `headlamp` namespace,
+  its own Argo CD Application, values in `k8s/headlamp/headlamp-values.yaml`) is a general-purpose
+  Kubernetes web UI - browsing any resource, logs, node status - a different job than
+  Grafana/OpenObserve's time series. It's the highest-risk tool here, so it's port-forward only and
+  its ServiceAccount is bound to the read-only `view` ClusterRole instead of the chart's default
+  `cluster-admin` - see [Headlamp](#headlamp).
 
   Headlamp's image bundles the official
   [Prometheus plugin](https://github.com/headlamp-k8s/plugins/tree/main/prometheus)
@@ -128,75 +160,68 @@ on macOS/most Linux out of the box - see [Deployment with Kind / Kubernetes](#de
 
   `write_relabel_configs` in `k8s/observability/config/prometheus.yml` deliberately keeps only
   four scrape jobs - `otel-collector` (the message-service's own metrics), plus `node-exporter`,
-  `kube-state-metrics`, and `kubernetes-nodes-cadvisor` (the same three jobs behind the "kind cluster
+  `kube-state-metrics`, and `kubernetes-nodes-cadvisor` (the same three jobs behind the "Cluster
   ops" Grafana dashboard) - not every job Prometheus scrapes. See `PROMETHEUS.md` for why (an earlier
   attempt at forwarding everything unfiltered overflowed OpenObserve's single-node in-memory MemTable).
 
 ## Continuous Deployment with ArgoCD
 
-The API is deployed via GitOps rather than the local build/load loop described in
-[Pushing a code change to the running cluster](#pushing-a-code-change-to-the-running-cluster):
-GitHub Actions builds and pushes images to Docker Hub, and [ArgoCD](https://argo-cd.readthedocs.io/)
-(`deploy-kind.sh` installs it into its own `argocd` namespace, exposed at `http://argocd.localhost/`)
-plus [Argo CD Image Updater](https://argocd-image-updater.readthedocs.io/) take it from there.
+The whole platform, not just the API, is deployed by [Argo CD](https://argo-cd.readthedocs.io/)
+from this repo's `main` branch (`https://github.com/miqui/gke-fastapi-o2.git` - public, so Argo CD
+clones it anonymously). `gke-bootstrap.sh` does exactly two things by hand - `helm install` Argo CD
+and `kubectl apply` one **root** Application (`k8s/argocd/root-application.yaml`) - and the root
+Application syncs every other Application from `k8s/argocd/apps/` ("app of apps"), Argo CD itself
+included. After bootstrap there is no `helm` or `kubectl apply` step left: a version bump, a values
+change or a new manifest is a merged commit.
+
+Install order comes from `argocd.argoproj.io/sync-wave` annotations on the child Applications; a
+wave only starts once the previous one is Healthy. That needs the Application health check Argo CD
+dropped in 1.8, re-added in `k8s/argocd/argocd-values.yaml`, along with health checks that make
+Crossplane packages, managed resources and the `PostgresInstance` report their real Ready state.
+
+| Wave | Application | Source |
+| --- | --- | --- |
+| -4 | `argocd` (self-managed), `external-secrets`, `crossplane` | upstream charts + values from `k8s/argocd/`, `k8s/external-secrets/`, `k8s/crossplane/` |
+| -3 | `kyverno`, `platform` | Kyverno chart; `k8s/platform/` (secret store, Crossplane provider/functions/config, `PostgresInstance` API) |
+| -2 | `kyverno-policies` | `k8s/policies/` - enforce rules exist before any workload syncs |
+| -1 | `observability`, `headlamp`, `trivy-operator`, `argocd-image-updater` | `k8s/observability/`; charts + values |
+| 0 | `openobserve` | chart + `k8s/observability/openobserve-values.yaml` (needs the observability ExternalSecret) |
+| 1 | `fastapi-o2` | `k8s/`: `PostgresInstance`, app, Hazelcast, Gateway, NetworkPolicies |
+
+Every Application runs `automated: { prune: true, selfHeal: true }` (except Argo CD's own, which
+doesn't prune - a bad render must never delete the controller doing the deleting), so any change
+merged to `main`, or drift introduced by hand in the cluster, gets reconciled. See
+[`ARGOCD.md`](ARGOCD.md) for day-to-day commands.
 
 - **CI** (`.github/workflows/message-service-ci.yml`): on push to `main` (and on pull requests, up
   to the test gate), path-filtered to `app/**`, `migrations/**`, `pyproject.toml`, `uv.lock` and the
   `Dockerfile`, the workflow runs `ruff check`, `pyright` and `pytest` (against a Postgres service
-  container) as a gate, then builds and pushes `docker.io/miqui/rest-message-api`, tagged
+  container) as a gate, then builds and pushes
+  `us-central1-docker.pkg.dev/k8s-dev-412419/api-images/rest-message-api`, tagged
   `<UTC yyyymmddHHMMSS>-<7-char sha>` (e.g. `20260918140501-a1b2c3d`, sortable by build time yet
-  traceable to a commit) plus a floating `:latest`. Images are built for both `linux/amd64` and
-  `linux/arm64` (via QEMU): kind's nodes run the host's architecture (arm64 on Apple Silicon), and an
-  amd64-only image fails to pull there with `no match for platform in manifest`. Push credentials
-  (`DOCKERHUB_USERNAME`/`DOCKERHUB_TOKEN`, a **read/write** Docker Hub access token, not the account
-  password) are GitHub Actions repository secrets, never committed.
-- **ArgoCD** owns one `Application` (`k8s/argocd/application.yaml`, `fastapi-o2`) whose source is
-  this repo's `k8s/` Kustomization - the Postgres/Hazelcast/message-service/Ingress/ResourceQuota set
-  `kubectl apply -k k8s/` would apply directly. `syncPolicy.automated: { prune: true, selfHeal: true }`
-  means any manifest change pushed to `main` (or drift corrected by hand in the live cluster) gets
-  reconciled automatically. This repo is public, so ArgoCD clones it anonymously - no repository
-  credential is needed. The three Applications' `repoURL` is
-  `https://github.com/miqui/k8s-fastapi-o2.git`: that repository must exist, with these manifests on
-  `main`, before `deploy-kind.sh` runs.
-
-- **Observability** is a second `Application` (`k8s/argocd/observability-application.yaml`, `observability`)
-  syncing `k8s/observability/` into the `observability` namespace, with the same automated prune/self-heal.
-  A merged dashboard, scrape-config or collector-config change therefore reaches the cluster through Argo
-  instead of a hand-run `kubectl apply`. Prometheus, the OTel Collector and the log collector read their
-  config once at startup, so their ConfigMaps are generated by kustomize (`configMapGenerator`, sources
-  in `k8s/observability/config/`): the content hash in the name rolls the pod whenever the config changes.
-  The namespace carries `Prune=false` so it can't be deleted by removing it from git (OpenObserve's PVC
-  lives there). OpenObserve and Headlamp are Helm installs and stay outside it. See
-  [`ARGOCD.md`](ARGOCD.md) for the details and the one-time bootstrap on an existing cluster.
-- **Argo CD Image Updater** (v1.x, pinned to `v1.3.0` in `deploy-kind.sh`) is configured by an
-  `ImageUpdater` custom resource (`k8s/argocd/image-updater.yaml`) - v1.x replaced v0.x's
-  Application annotations with this CRD. It watches `docker.io/miqui/rest-message-api`, considers only tags matching `^[0-9]{14}-[0-9a-f]{7}$` (so never the
-  floating `:latest`), and picks the highest one with the `alphabetical` strategy - i.e. the newest
-  build, given the timestamp-prefixed tags. `newest-build` would be the obvious strategy but its
-  docs advise against it on Docker Hub: it fetches a manifest per tag to read creation dates, and
-  those count against pull limits. It polls with a **separate, read-only** Docker Hub token
-  (`DOCKERHUB_TOKEN_RO`, also from 1Password) so a compromised in-cluster credential can't push or
-  delete images. On finding a new tag it patches the `Application`'s Kustomize image override
-  directly (the default `argocd` write-back method, equivalent to `kustomize edit set image
-  message-service=docker.io/miqui/rest-message-api:<tag>` - `manifestTargets.kustomize.name` maps
-  the Deployment specs' short image name onto it) - no git commits, so CI and Image Updater never
-  need push access to the GitHub repo at all.
-- **The credential Secrets are the deliberate exception.** (`postgres-credentials`; the observability
-  Application handles `grafana-credentials` and `openobserve-remote-write-credentials` the same way.) `k8s/secret.yaml` is a
-  committed placeholder (`YOUR_POSTGRES_DB_USER`, etc. - see its own comment); `deploy-kind.sh`
-  overwrites it in-cluster with real 1Password-sourced values right after the `Application`'s
-  first sync. Two settings in `application.yaml` keep ArgoCD from reverting it to the placeholder:
-  `ignoreDifferences` on that Secret (so it isn't flagged as drift) **and** the
-  `RespectIgnoreDifferences=true` sync option. Both are needed: `ignoreDifferences` alone only
-  suppresses drift *detection*, while every sync - including the one Image Updater triggers when it
-  changes an image - still applies the full manifest and would overwrite the real Secret, which
-  breaks Postgres auth for any pod that starts afterward (`password authentication failed for
-  user "YOUR_POSTGRES_DB_USER"`). This was hit for real on the first rollout.
-- **Login**: `admin` / `kubectl -n argocd get secret argocd-initial-admin-secret -o
-  jsonpath='{.data.password}' | base64 -d` (same bearer-token-retrieval idiom as Headlamp above).
-  `argocd-server` is patched with `--insecure` so the plain-HTTP `*.localhost` Ingress pattern used
-  for Grafana/OpenObserve/Headlamp works here too, rather than needing TLS passthrough.
-
+  traceable to a commit) plus a floating `:latest`, `linux/amd64` only (GKE's e2 nodes). **There is no
+  stored registry credential**: the job exchanges GitHub's OIDC token through Workload Identity
+  Federation for a short-lived token of the `ci-pusher` service account, which can only write to
+  that one repository, and the federation provider only accepts tokens minted for this repo's `main`
+  branch. The two repository **variables** it needs (`GCP_WIF_PROVIDER`, `GCP_CI_SA`) are printed by
+  `gke-deploy.sh`.
+- **Argo CD Image Updater** (chart 1.3.1 = v1.3.0) is configured by an `ImageUpdater` custom
+  resource (`k8s/argocd/image-updater/imageupdater.yaml`). It watches the Artifact Registry image,
+  considers only tags matching `^[0-9]{14}-[0-9a-f]{7}$` (so never the floating `:latest`), and picks
+  the highest one with the `alphabetical` strategy - i.e. the newest build, given the
+  timestamp-prefixed tags - without fetching a manifest per tag as `newest-build` would. It
+  authenticates to Artifact Registry with a short-lived token fetched from the GKE metadata server
+  by a small script (`k8s/argocd/image-updater-values.yaml`) as the `argocd-image-updater` service
+  account (Workload Identity, read-only on the repo). On finding a new tag it patches the
+  `fastapi-o2` Application's Kustomize image override directly (the default `argocd` write-back
+  method) - no git commits, so CI and Image Updater never need push access to the GitHub repo. The
+  root Application ignores that one field (`ignoreDifferences` on `/spec/source/kustomize`), or its
+  self-heal would revert every image update.
+- **Secrets** need no special handling in Argo CD any more: git holds `ExternalSecret`s (references,
+  no values) and External Secrets owns the resulting Secrets, so a sync can't overwrite a real value
+  with a placeholder.
+- **Login**: `./gke-port-forward.sh argocd`, then `https://localhost:8081` (self-signed cert) as
+  `admin` / `kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d`.
 ## Policy as Code with Kyverno
 
 [Kyverno](https://kyverno.io/) admission-controls what may run in the cluster, and the *same*
@@ -205,10 +230,10 @@ CEL-based `policies.kyverno.io/v1` types (`ValidatingPolicy`, `PolicyException`)
 `ClusterPolicy` is deprecated (Kyverno's docs schedule its removal for v1.20), so don't copy
 examples that use it.
 
-- **Delivery**: `deploy-kind.sh` installs Kyverno itself with Helm (pinned, values in
-  `k8s/kyverno/kyverno-values.yaml`); the policies are a separate ArgoCD `Application`
-  (`kyverno-policies`) syncing `k8s/policies/` with `prune` + `selfHeal`, so a rule deleted from git
-  stops being enforced and a policy edited or deleted by hand is put back.
+- **Delivery**: Kyverno itself is the `kyverno` Argo CD Application (upstream chart, pinned, values
+  in `k8s/kyverno/kyverno-values.yaml`); the policies are a separate Application
+  (`kyverno-policies`, one sync wave later) syncing `k8s/policies/` with `prune` + `selfHeal`, so a
+  rule deleted from git stops being enforced and a policy edited or deleted by hand is put back.
 - **Layout** (`k8s/policies/`): `rules/` holds each rule body once, unscoped. Two kustomize overlays
   turn them into a **Deny** copy for the `default` namespace (`overlays/enforce-default`, names get
   an `-enforce` suffix) and an **Audit** copy for `observability` and `headlamp`
@@ -223,7 +248,7 @@ examples that use it.
 | `require-resources` | CPU and memory requests **and** limits on every container | same |
 | `restrict-image-repositories` | image must be on an exact-repository allowlist (tags/digests ignored; `postgres:16-alpine` is normalized to `docker.io/library/postgres`) | same |
 | `disallow-latest-tag` | image pinned to a tag other than `:latest`, or a digest | Audit only |
-| `restrict-cluster-admin-bindings` | `ClusterRoleBinding`s to `cluster-admin` (built-in `system:`/`kubeadm:` ones skipped) | Audit only, cluster-wide |
+| `restrict-cluster-admin-bindings` | `ClusterRoleBinding`s to `cluster-admin` (built-in `system:`/`gke-`/`gcp:` ones skipped) | Audit only, cluster-wide |
 
 Rules that match Pods also cover Deployments, StatefulSets and DaemonSets (Kyverno "autogen"), so a
 non-compliant Deployment is rejected when ArgoCD applies it rather than stalling later as
@@ -231,18 +256,17 @@ ReplicaSet events. `disallow-latest-tag` is audit-only on purpose: `k8s/kustomiz
 `newTag: latest` is the fallback for the very first sync, before Image Updater swaps in a timestamped
 tag, so denying it would block the first rollout.
 
-**Hardened workloads.** To pass the enforce set, the `default`-namespace workloads now set a
-`securityContext`: message-service runs as uid/gid 10001 with a read-only root filesystem (the image's numeric `app` user - the kubelet can only verify
-`runAsNonRoot` for a numeric uid, so `runAsUser` is set explicitly as well), postgres
-as 70 (its exporter sidecar as 65534) and hazelcast as 100:101, all with privilege escalation off and
-all capabilities dropped. A Postgres volume first initialized by the old root-started container is
-already owned by uid 70, so nothing needs migrating - but the securityContext change rolls
-`postgres-0`, which means a short database outage for the API the first time it syncs.
+**Hardened workloads.** To pass the enforce set, the `default`-namespace workloads set a
+`securityContext`: message-service runs as uid/gid 10001 with a read-only root filesystem (the
+image's numeric `app` user - the kubelet can only verify `runAsNonRoot` for a numeric uid, so
+`runAsUser` is set explicitly as well), postgres-exporter as 65534 and hazelcast as 100:101, all
+with privilege escalation off and all capabilities dropped.
 
 **Exceptions** (`k8s/policies/exceptions/`) record known, accepted violations: `node-exporter` (it
 needs `hostNetwork`/`hostPID`, a `hostPath` mount of `/` and a `hostPort` to read node metrics) is
-exempt from the host-access and container-context audit rules, and the Headlamp chart's
-`headlamp-admin` `cluster-admin` binding from `restrict-cluster-admin-bindings`. They live in the
+exempt from the host-access and container-context audit rules, and so is `log-collector` (a
+root-run `hostPath` read of `/var/log/pods`). Headlamp no longer needs one - its binding is to
+`view`, not `cluster-admin`. They live in the
 `kyverno` namespace because that is the only place `features.policyExceptions` honours them. To add
 one, create the file, list it in that directory's `kustomization.yaml`, and reference the
 **suffixed** policy name in `policyRefs` (e.g. `require-secure-container-context-audit`).
@@ -280,9 +304,9 @@ A `kubectl` cheat sheet for debugging denials, audit findings and Kyverno itself
 - **New image**: add its repository to `allowed` in `k8s/policies/rules/restrict-image-repositories.yaml`
   (one list serves both the enforce and audit copies), or the enforce set will reject it.
 - **New namespace / widening enforcement**: change the `namespaceSelector` in the overlays' patches.
-  The webhook additionally never sees `kube-system`, `argocd`, `ingress-nginx` or
-  `local-path-storage` (`config.webhooks` in `kyverno-values.yaml`), so an unhealthy Kyverno can't
-  block system or GitOps changes.
+  The webhook additionally never sees `kube-system`, `argocd`, `crossplane-system`,
+  `external-secrets` or GKE's managed namespaces (`config.webhooks` in `kyverno-values.yaml`), so
+  an unhealthy Kyverno can't block system, GitOps or platform changes.
 - **Promoting an audit policy to enforce**: for a namespaced rule like `disallow-latest-tag`, fix
   what it flags first, then move it from `audit-only/` into `rules/` (and drop its own
   `namespaceSelector` - the overlays add one) so it gets Deny/Audit copies like the others; any
@@ -291,17 +315,17 @@ A `kubectl` cheat sheet for debugging denials, audit findings and Kyverno itself
 
 ### Status and limits
 
-- Kyverno v1.19 is tested against Kubernetes 1.33-1.35; the kind nodes here run a newer version.
-  That is accepted rather than pinned - if the policies misbehave after a kind upgrade, suspect this
-  first, and check `kubectl get pods -n kyverno` after the first deploy.
+- Kyverno v1.19 is tested against Kubernetes 1.33-1.35; GKE's `stable` channel is on 1.35 at the
+  time of writing. When the channel moves past what Kyverno supports, suspect this first if the
+  policies misbehave, and check `kubectl get pods -n kyverno`.
 - `restrict-image-repositories` is exact-match on the *spelling*: `index.docker.io/...` is rejected
   even though it is Docker Hub. Only images in this repo's manifests are checked in CI - the
   Headlamp and OpenObserve charts are not rendered, so their pods are covered by the in-cluster audit
   policies only.
 - The `observability` workloads are report-only until they get their own `securityContext`s.
 - **Fail-closed on `default`.** The enforce policies keep Kyverno's default `failurePolicy: Fail`, and
-  Kyverno runs one replica here, so while it is down (a restart, or all kind nodes coming back up at
-  once) pod creation in `default` is rejected and retries until Kyverno is back. The audit policies
+  Kyverno runs one replica here, so while it is down (a restart, or a node upgrade/repair evicting
+  it) pod creation in `default` is rejected and retries until Kyverno is back. The audit policies
   set `failurePolicy: Ignore` - they can never deny, so an outage must not block anything on their
   account. Excluded namespaces (see above) are unaffected either way.
 - **Reports need RBAC.** Kyverno's reports controller can only scan kinds the chart granted it;
@@ -319,27 +343,28 @@ A `kubectl` cheat sheet for debugging denials, audit findings and Kyverno itself
 [Trivy Operator](https://github.com/aquasecurity/trivy-operator) continuously scans every workload's
 images (CVEs, baked-in secrets) and the cluster's resources (misconfigurations, RBAC, CIS/NSA/PSS
 compliance), storing results as `VulnerabilityReport`, `ConfigAuditReport` etc. objects. It's
-installed by its own Argo CD Application (`k8s/argocd/trivy-operator-application.yaml`: upstream
+installed by its own Argo CD Application (`k8s/argocd/apps/trivy-operator.yaml`: upstream
 Helm chart plus `k8s/trivy-operator/trivy-operator-values.yaml` from this repo) into `trivy-system`.
 Prometheus scrapes its metrics and the **Trivy Security** Grafana dashboard
-(`http://grafana.localhost/d/trivy-security`) summarises them by severity, namespace and image.
+(`http://localhost:3000/d/trivy-security` via `./gke-port-forward.sh`) summarises them by severity,
+namespace and image.
 
 It only reports; Kyverno is what enforces. Setup choices, `kubectl` commands for drilling into
 individual CVEs and findings, and the dashboard's panels are in [TRIVY.md](TRIVY.md).
 
 ## Git history
 
-The local `.git` directory was carried over on purpose, as background reference: `git log` /
-`git show` against earlier commits still show the previous implementations of this service (the
-`java-origin` remote points at the original project).
+History starts with a baseline commit of the pre-GKE project (local cluster, in-cluster Postgres,
+Docker Hub images), followed by the GKE migration - `git show` the baseline for how things were
+before.
 
 ## Running the Application
 
 ### 1. Local run against PostgreSQL + Hazelcast
 
 Requires [uv](https://docs.astral.sh/uv/) (it installs the Python version pinned in
-`.python-version` for you). Start a local PostgreSQL instance (or reuse the one deployed in kind -
-see below), plus a local Hazelcast member for the cache, and point the app at both:
+`.python-version` for you). Start a local PostgreSQL instance plus a local Hazelcast member for the
+cache, and point the app at both:
 
 ```bash
 docker run --rm -d --name message-postgres \
@@ -406,66 +431,94 @@ server is PID 1 and receives `SIGTERM` directly.
 ---
 
 
-## Deployment with Kind / Kubernetes
+## Deployment to GKE
 
-- **Deploy to local Kind cluster**: requires the [1Password CLI](https://developer.1password.com/docs/cli/) (`op`),
-  installed and signed in (`eval $(op signin)`) - `deploy-kind.sh` checks both and fails fast otherwise, since
-  PostgreSQL/Grafana/OpenObserve/Docker Hub credentials all come from it and there's no valid fallback.
-    ```bash
-    cp .env.example .env
-    # Edit .env with your op://<vault>/<item>/<field> URIs
-    op run --env-file=.env -- ./deploy-kind.sh
-    ```
-  - Creates a 7-node kind cluster (1 control-plane, 2 API workers, 1 DB worker, 1 observability
-    worker, 1 cache worker, 1 OpenObserve worker) if it doesn't exist yet.
-  - Installs the ingress-nginx controller and waits for it to become ready.
-  - Installs metrics-server (patched with `--kubelet-insecure-tls`) and waits for it to become ready -
-    required for the `message-service` `HorizontalPodAutoscaler` to read CPU/memory usage.
-  - Installs ArgoCD and Argo CD Image Updater into the `argocd` namespace, configures Image
-    Updater's read-only Docker Hub credentials, and exposes the ArgoCD UI at
-    `http://argocd.localhost/` - see [Continuous Deployment with ArgoCD](#continuous-deployment-with-argocd).
-    The `message-service` image is not built or `kind load`-ed locally; it comes from Docker Hub,
-    built and pushed by GitHub Actions on push to `main`.
-  - Installs [Kyverno](#policy-as-code-with-kyverno) via Helm (`kyverno/kyverno`, chart `3.9.1` =
-    Kyverno v1.19.1, values in `k8s/kyverno/kyverno-values.yaml`) into its own `kyverno` namespace,
-    before the observability stack, and waits for its `ValidatingPolicy`/`PolicyException` CRDs.
-  - Registers the `observability` ArgoCD `Application` (`k8s/argocd/observability-application.yaml`, syncing
-    `k8s/observability/`: OTel Collector, Prometheus, Grafana - see Architecture above) and waits for its first
-    sync - it tracks `main`, so `k8s/observability/` has to be merged before you run the script - then
-    dynamically injects observability secrets from environment, then
-    installs OpenObserve via Helm (`openobserve/openobserve-standalone` - see Architecture above)
-    and Headlamp via Helm (`headlamp/headlamp` - see Architecture above).
-  - Registers the `kyverno-policies` ArgoCD `Application` (`k8s/argocd/policies-application.yaml`,
-    syncing `k8s/policies/`) and waits for its first sync - *before* the app `Application` below,
-    so the enforce policies already exist when the workloads first sync. It tracks `main`, so
-    `k8s/policies/` has to be merged before you run the script.
-  - Registers the `trivy-operator` ArgoCD `Application` (`k8s/argocd/trivy-operator-application.yaml`:
-    the upstream `aqua/trivy-operator` Helm chart with `k8s/trivy-operator/trivy-operator-values.yaml`
-    from `main`) and waits for its first sync; scan results keep arriving for minutes after. See
-    [TRIVY.md](TRIVY.md).
-  - Registers the ArgoCD `Application` that owns `k8s/` (replacing a direct `kubectl apply -k
-    k8s/`): `Secret` + `ConfigMap`s, the `postgres` `StatefulSet`/headless `Service` (which creates
-    `messagedb` via `POSTGRES_DB`), the `hazelcast` `Deployment`/`Service`, and the `message-service`
-    `Deployment`/`Service` (`ClusterIP`)/`HorizontalPodAutoscaler`/`Ingress`. Waits for the
-    `Application`'s first sync, then dynamically injects the real PostgreSQL database credentials
-    from environment (overwriting the placeholder `k8s/secret.yaml` ArgoCD just synced).
-  - Waits for PostgreSQL and Hazelcast to become ready before waiting on the API's rollout (the
-    `message-service` Deployment runs `wait-for-postgres` and `wait-for-hazelcast` init containers).
-- **Tear down cluster**: `./teardown-kind.sh`
-- **Test endpoints**: `./test-api.sh` (exits non-zero on any failed check; `BASE_URL=... ./test-api.sh` to
-  point it elsewhere)
+Four scripts, run from the repo root. Requirements: `gcloud` (authenticated, with roles/owner or
+equivalent on `k8s-dev-412419`), `kubectl`, `helm`, and the
+[1Password CLI](https://developer.1password.com/docs/cli/) (`op`, signed in) for the two steps that
+read secrets.
+
+```bash
+cp .env.example .env            # then point the op:// URIs at your 1Password items
+export PROJECT_ID=k8s-dev-412419
+
+# 1. GCP foundation + cluster (~10 min). With op run, the Cloudflare DNS records are set for you.
+op run --env-file=.env -- ./gke-deploy.sh
+
+# 2. Secrets -> Secret Manager (first time, and after rotating anything in 1Password)
+op run --env-file=.env -- ./gke-secrets-seed.sh
+
+# 3. Argo CD + everything else via GitOps (~20-25 min, most of it Cloud SQL provisioning)
+./gke-bootstrap.sh
+
+# 4. Tools
+./gke-port-forward.sh
+```
+
+**Before the first run only:**
+
+- **Push this repo to `github.com/miqui/gke-fastapi-o2` (public), branch `main`.** Argo CD syncs
+  from there, not from your working copy - `gke-bootstrap.sh` checks it's readable and warns about
+  unpushed local commits.
+- **Cloudflare**: create an API token scoped to *Zone -> DNS -> Edit* for `miqui.dev` only and put
+  it in 1Password (`CLOUDFLARE_API_TOKEN` in `.env`). Without it, `gke-deploy.sh` prints the two
+  records to add by hand; both must be **DNS only** (grey cloud), not proxied:
+  - `A     api.miqui.dev -> <api-ip>` - changes on every rebuild (the IP is released on teardown);
+  - `CNAME _acme-challenge.api.miqui.dev -> <...>.authorize.certificatemanager.goog` - once; it's
+    how Google validates the certificate. First issuance takes ~15-60 minutes after the CNAME
+    resolves; after that the certificate is kept across rebuilds.
+- **GitHub**: add the repository variables `GCP_WIF_PROVIDER` and `GCP_CI_SA` printed by
+  `gke-deploy.sh` (Settings -> Secrets and variables -> Actions -> Variables), then run the CI
+  workflow once (push to `main`, or *Run workflow*) so Artifact Registry has an image. Until then the
+  `message-service` pods sit in `ImagePullBackOff`.
+
+**What each script does:**
+
+- `gke-deploy.sh` - idempotent; every step skips what already exists:
+  - service accounts (`gke-dev-nodes`, `crossplane-gcp`, `external-secrets`,
+    `argocd-image-updater`, `ci-pusher`) and their narrowly scoped roles;
+  - VPC, subnet, Cloud Router + NAT, Private Service Access range + peering (for Cloud SQL);
+  - the cluster (flags in [Architecture](#architecture)), plus a firewall rule letting the control
+    plane reach admission webhooks on 8443/9443 (Kyverno, Crossplane) - private-node clusters
+    otherwise only allow 443/10250, and a webhook it can't reach blocks every matching create;
+  - Workload Identity bindings for the three in-cluster controllers;
+  - Artifact Registry repo with a cleanup policy (keep the 20 newest, drop untagged after a day,
+    tagged after 14 days) and the Workload Identity Federation pool/provider for GitHub Actions;
+  - the public edge: static IP, SSL policy, Certificate Manager DNS authorization + certificate +
+    map; and the Cloudflare records when a token is set.
+- `gke-secrets-seed.sh` - creates/updates five Secret Manager secrets from `.env`
+  (`postgres-app-password`, `grafana-admin-user`, `grafana-admin-password`,
+  `openobserve-root-email`, `openobserve-root-password`), adding a version only when the value
+  changed, and grants the `external-secrets` service account access to exactly those.
+- `gke-bootstrap.sh` - preflight (context, Secret Manager, public repo), `helm install` Argo CD,
+  apply the root Application, wait until every Application is Synced + Healthy, then check
+  `https://api.miqui.dev/health/liveness`. Safe to re-run.
+- `gke-teardown.sh` - in dependency order: stops Argo CD reconciling, deletes the Gateway (so
+  Google removes the load balancer) and the `PostgresInstance` (so Crossplane deletes Cloud SQL) and
+  **waits for both** - deleting the cluster first would leave them running and billing with nothing
+  managing them - then the cluster, the peering, static IP, SSL policy, the Cloudflare `A` record
+  (a released IP can be handed to another customer), firewall rules, NAT, router, subnet and VPC.
+  It then double-checks for any leftover Cloud SQL instance labelled `platform=gke-fastapi-o2`.
+  **Kept by default** (free or pennies, and slow or awkward to recreate): the Artifact Registry repo
+  and its images, the certificate/map/DNS authorization, Secret Manager secrets, service accounts
+  and the GitHub Workload Identity pool. `--purge` removes those too. `--yes` skips the prompt.
+- **Test endpoints**: `./test-api.sh` (exits non-zero on any failed check; defaults to
+  `https://api.miqui.dev`, `BASE_URL=... ./test-api.sh` to point it elsewhere).
+
+**If your public IP changes**, the control plane stops answering (`kubectl` times out) - re-authorize
+it with the command `gke-deploy.sh` prints at the end.
 
 ### Pushing a code change to the running cluster
 
-Code changes don't go through a local `docker build`/`kind load`/`rollout restart` loop - see
+Code changes don't go through a local build/load/restart loop - see
 [Continuous Deployment with ArgoCD](#continuous-deployment-with-argocd) above. The flow is:
 
 1. `git push` to `main` (a change under `app/**`, `migrations/**`, `pyproject.toml`, `uv.lock` or the
    `Dockerfile`) triggers `.github/workflows/message-service-ci.yml`, which lints, type-checks, tests,
-   then builds and pushes a new commit-SHA-tagged image to Docker Hub.
+   then builds and pushes a new commit-SHA-tagged image to Artifact Registry.
 2. Argo CD Image Updater (polling every 2 minutes by default) notices the new tag and updates the
-   ArgoCD `Application`'s image override.
-3. ArgoCD syncs the change, and `kubectl rollout status deployment/message-service` shows the rolling
+   `fastapi-o2` Application's image override.
+3. Argo CD syncs the change, and `kubectl rollout status deployment/message-service` shows the rolling
    update happening.
 
 This also runs `alembic upgrade head` again on every pod start (see the Dockerfile's `ENTRYPOINT`) -
@@ -479,84 +532,48 @@ vs. seconds) - it's the deploy step, not the "test my change" step. For fast ite
 described in [Local run against PostgreSQL + Hazelcast](#1-local-run-against-postgresql--hazelcast)
 above, and only push to `main` once you're ready to deploy.
 
-A change to a manifest itself (env vars, resources, the Ingress, a new Kustomize resource, etc.)
-under `k8s/` doesn't need a CI push at all - ArgoCD's own `selfHeal`/polling picks it up directly
-from git the next time it reconciles (or immediately via the ArgoCD UI/CLI's manual "Sync" if you
-don't want to wait). The cluster/node topology (`k8s/kind-config.yaml`) is still unmanaged by
-ArgoCD - a `kind-config.yaml` change still needs [recreating the cluster](#adding-a-new-kind-node).
+A change to a manifest or chart values under `k8s/` doesn't need a CI run at all - Argo CD picks it
+up from git the next time it reconciles (or immediately with a manual "Sync"). Cluster-level
+settings (machine type, node count range, cluster flags) live in `gke-deploy.sh`; changing the node
+range on a running cluster is `gcloud container clusters update dev-cluster --zone=us-central1-a
+--enable-autoscaling --min-nodes=N --max-nodes=M`, while flags that only apply at creation
+(Dataplane V2, private nodes) need a teardown and redeploy.
 
-
-`deploy-kind.sh` already points your current `kubectl` context at the cluster
-(`kubectl config use-context kind-kind-fastapi-cluster`), so no extra kubeconfig setup is
-needed for the commands above. If you want a standalone `kubeconfig.yml` for this cluster instead —
-e.g. to hand to another tool, or to talk to it without touching your default `~/.kube/config` context —
-generate one with:
+`gke-deploy.sh` and `gke-bootstrap.sh` point your current `kubectl` context at the cluster
+(`gke_k8s-dev-412419_us-central1-a_dev-cluster`). For a standalone kubeconfig - e.g. to hand to
+another tool without touching `~/.kube/config`:
 
 ```bash
-kind get kubeconfig --name kind-fastapi-cluster > kubeconfig.yml
-export KUBECONFIG=./kubeconfig.yml   # use it for the current shell
-kubectl get nodes -L workload
+KUBECONFIG=./kubeconfig.yml gcloud container clusters get-credentials dev-cluster --zone=us-central1-a
+export KUBECONFIG=./kubeconfig.yml
+kubectl get nodes
 ```
 
-`kind get kubeconfig` always regenerates the file from the cluster's current certs, so re-run it if the
-cluster is ever torn down and recreated. Don't commit `kubeconfig.yml` — it embeds client certificates
-that grant full cluster-admin access to this kind cluster (`.gitignore` already excludes it by name).
+It holds no long-lived credential - it calls `gcloud` for a fresh token - but still don't commit it
+(`.gitignore` excludes `kubeconfig.yml` by name).
 
-> The credentials in `k8s/secret.yaml` are plaintext defaults meant only for this disposable local
-> kind cluster. Do not reuse them, and manage real secrets with a proper secrets manager in any
-> shared or production environment.
+### Headlamp
 
-### Adding a new kind node
+Headlamp can show everything in the cluster, so it gets the least access that's still useful:
 
-Unlike the code-push flow above, node topology **cannot** be changed on a running kind cluster —
-kind has no "add node" command, since each node's kubeadm role is fixed at `kind create cluster`
-time via `k8s/kind-config.yaml`. Adding one means recreating the cluster.
-
-1. **Add the new worker to `k8s/kind-config.yaml`**, matching the existing API workers' pattern:
-   ```yaml
-     - role: worker
-       kubeadmConfigPatches:
-         - |
-           kind: JoinConfiguration
-           nodeRegistration:
-             kubeletExtraArgs:
-               node-labels: "workload=api"
-   ```
-
-2. **Recreate the cluster** with the updated config:
+1. `./gke-port-forward.sh headlamp`, then open `http://localhost:4466`.
+2. Log in with a short-lived token for Headlamp's own ServiceAccount, which is bound to the
+   built-in **`view`** ClusterRole (read most resources; no Secrets, no exec, no writes). On macOS,
+   pipe it straight to the clipboard - long tokens pick up stray line breaks when copied by hand:
    ```bash
-   kind delete cluster --name kind-fastapi-cluster
-   kind create cluster --name kind-fastapi-cluster --config k8s/kind-config.yaml
+   kubectl create token headlamp -n headlamp --duration=1h | tr -d '\n' | pbcopy
    ```
-   This wipes all cluster state (PostgreSQL data, any messages created only at runtime) - it's a
-   fresh cluster, rebuilt from the manifests in `k8s/`.
-
-3. **Bump the API replica count** in `k8s/deployment.yaml` (`spec.replicas: 3` -> `4`). The
-   Deployment's `nodeSelector: workload: api` already targets any node with that label; it's the
-   extra replica - combined with the existing `podAntiAffinity` spread by `kubernetes.io/hostname`
-   - that actually lands a pod on the new node instead of just adding another pod to an
-   already-occupied one.
-
-4. **Redeploy** - since the cluster is new, `deploy-kind.sh` detects it doesn't exist yet and
-   recreates it from step 1's config, then reapplies every manifest including the new replica count:
-   ```bash
-   ./deploy-kind.sh
-   ```
-
-5. **Verify** the new node exists and is running the API:
-   ```bash
-   kubectl get nodes -L workload -o wide
-   kubectl get pods -l app=message-service -o wide
-   ```
-   Confirm a `message-service` pod's `NODE` column shows the new worker.
-
+3. For something that needs more (editing, exec), use `kubectl` with your own Google identity, or
+   mint a short-lived token for a dedicated identity only while you need it. Don't widen the
+   `headlamp` binding - that would make every Headlamp login an admin login.
 ### Viewing metrics in Grafana
 
-`deploy-kind.sh` also applies `k8s/observability/` (a separate Kustomization, in its own
-`observability` namespace) and waits for it to roll out. Once deployed:
+`k8s/observability/` is the `observability` Argo CD Application (its own namespace). Open the
+tunnels with `./gke-port-forward.sh`, then:
 
-- **Grafana**: `http://grafana.localhost/` — log in with credentials configured via Secrets / 1Password (see
-  `k8s/observability/grafana-secret.yaml`) and open one of eight
+- **Grafana**: `http://localhost:3000` — log in with the admin credentials from Secret Manager
+  (`kubectl -n observability get secret grafana-credentials -o jsonpath='{.data.GF_SECURITY_ADMIN_PASSWORD}' | base64 -d`)
+  and open one of eight
   pre-provisioned dashboards, all in `k8s/observability/grafana-dashboard-json-configmap.yaml` as plain
   PromQL against real, verified metric names - if you add new panels, check the exact metric names
   Prometheus actually stores first (they differ from the raw OTLP names — see below):
@@ -573,7 +590,7 @@ time via `k8s/kind-config.yaml`. Adding one means recreating the cluster.
   (`message-service`) - every series is filtered on the `service_name` label, so a second API pushing
   identically named metrics through the same collector would simply show up there as another option.
 
-  - **kind cluster ops**: cluster-wide node/pod health - nodes ready, pod phases/restarts, per-node
+  - **Cluster ops**: cluster-wide node/pod health - nodes ready, pod phases/restarts, per-node
     CPU/memory/disk (via node-exporter), per-namespace container CPU/memory (via cAdvisor).
   - **PostgreSQL Ops & Queries**: connections, transaction/tuple rates, buffer cache hit ratio,
     locks, checkpoints, and per-query call rate/latency - see
@@ -587,18 +604,18 @@ time via `k8s/kind-config.yaml`. Adding one means recreating the cluster.
     `/metrics`, which is off by default (`config.ZO_PROMETHEUS_ENABLED` in
     `k8s/observability/openobserve-values.yaml` - confirmed live: with it off, `/metrics` returns
     HTTP 200 with an empty body). The MemTable Size panel is worth watching directly - that's the
-    exact thing that overflowed (see the "kind cluster ops" scope note above) before OpenObserve's
+    exact thing that overflowed (see the "Cluster ops" scope note above) before OpenObserve's
     resources were bumped and remote_write was scoped down.
-- **Prometheus** (not exposed via Ingress; use `kubectl port-forward -n observability svc/prometheus 9090:9090`
-  if you want its own UI at `http://localhost:9090`): scrapes `otel-collector.observability.svc.cluster.local:8889`
-  (app metrics), `postgres.default.svc.cluster.local:9187` (postgres_exporter) and
+- **Prometheus** (`http://localhost:9090` via `./gke-port-forward.sh`; it has no login, which is
+  why it's never exposed): scrapes `otel-collector.observability.svc.cluster.local:8889`
+  (app metrics), `postgres-exporter.default.svc.cluster.local:9187` (postgres_exporter) and
   `hazelcast.default.svc.cluster.local:9404` (Hazelcast's JMX exporter) cross-namespace - see below
   for both - plus `kube-state-metrics` and every `node-exporter` pod, and every node's kubelet
   cAdvisor endpoint via the API server proxy (see `k8s/observability/config/prometheus.yml` and
   `prometheus-rbac.yaml`) for the cluster-ops dashboard.
-- **OpenObserve**: `http://openobserve.localhost/` — log in with credentials configured via Secrets / 1Password
-  (see `k8s/observability/openobserve-values.yaml`). It receives the
-  message-service's own metrics plus kind cluster ops metrics (Prometheus `remote_write`s the
+- **OpenObserve**: `http://localhost:5080` — log in with the root credentials from Secret Manager
+  (the `openobserve-root-credentials` Secret). It receives the
+  message-service's own metrics plus cluster ops metrics (Prometheus `remote_write`s the
   `otel-collector`, `node-exporter`, `kube-state-metrics`, and `kubernetes-nodes-cadvisor` jobs into it
   — see `write_relabel_configs` in `k8s/observability/config/prometheus.yml`; every other scraped
   job is deliberately dropped before it reaches OpenObserve), under org `default`, one stream per
@@ -607,30 +624,14 @@ time via `k8s/kind-config.yaml`. Adding one means recreating the cluster.
   Logs/Metrics explorer, or via its search API:
   ```bash
   NOW_US=$(( $(date +%s) * 1000000 )); START_US=$(( NOW_US - 3600*1000000 ))
-  curl -s -u "$ZO_ROOT_USER_EMAIL:$ZO_ROOT_USER_PASSWORD" -X POST 'http://openobserve.localhost/api/default/_search?type=metrics' \
+  curl -s -u "$ZO_ROOT_USER_EMAIL:$ZO_ROOT_USER_PASSWORD" -X POST 'http://localhost:5080/api/default/_search?type=metrics' \
     -H 'Content-Type: application/json' \
     -d "{\"query\":{\"sql\":\"SELECT * FROM \\\"http_requests_total\\\" ORDER BY _timestamp DESC LIMIT 5\",\"start_time\":$START_US,\"end_time\":$NOW_US,\"size\":5}}"
   ```
   (`start_time`/`end_time` are epoch microseconds; OpenObserve rejects a query whose range doesn't
   look like one, e.g. `0`.)
-- **Headlamp**: `http://headlamp.localhost/` — a general-purpose Kubernetes dashboard (not a
-  metrics tool), for browsing/inspecting/editing any resource across the whole cluster: pods,
-  deployments, logs, exec-into-pod, node status, etc. Log in with a bearer token:
-
-  1. Generate a token for the chart's own `headlamp` ServiceAccount, which already has
-     `cluster-admin` via its default `ClusterRoleBinding` (see `k8s/headlamp/headlamp-values.yaml`):
-     ```bash
-     kubectl create token headlamp -n headlamp --duration=24h
-     ```
-  2. Open `http://headlamp.localhost/` and paste the token into the login page's token field.
-     On macOS, pipe straight to the clipboard instead of copying from a terminal selection - long
-     tokens are prone to picking up a stray line break or trailing whitespace when copied by hand,
-     which Headlamp will reject as an invalid token:
-     ```bash
-     kubectl create token headlamp -n headlamp --duration=24h | tr -d '\n' | pbcopy
-     ```
-  3. The token expires after `--duration` (24h above) - re-run the command and log in again once
-     it does; there's no refresh flow.
+- **Headlamp**: `http://localhost:4466` — a general-purpose Kubernetes dashboard (not a metrics
+  tool); read-only login, see [Headlamp](#headlamp).
 - **OTel Collector** (`k8s/observability/config/otel-collector.yaml`): receives OTLP metrics on
   `:4317` (gRPC) / `:4318` (HTTP) from every `message-service` pod
   (`OTEL_METRICS_URL` in `k8s/configmap.yaml` points at it) and re-exports them in Prometheus format
@@ -642,32 +643,31 @@ time via `k8s/kind-config.yaml`. Adding one means recreating the cluster.
   API env var in `k8s/deployment.yaml`).
 
 Prometheus here has no `PersistentVolumeClaim` — its data is ephemeral and resets whenever its pod
-restarts. That's fine for a local metrics-exploration setup; add a PVC to `prometheus-deployment.yaml`
-(or switch to a `StatefulSet` like `postgres`) if you want it to survive restarts.
+restarts. That's fine for a short-lived dev cluster; add a PVC to `prometheus-deployment.yaml`
+(or switch to a `StatefulSet`) if you want it to survive restarts.
 
 ### PostgreSQL Metrics (postgres_exporter)
 
-[`postgres_exporter`](https://github.com/prometheus-community/postgres_exporter) runs as a sidecar
-in the `postgres-0` pod (see `k8s/postgres-statefulset.yaml`) - it shares the pod's network
-namespace, so it reaches Postgres over `localhost:5432` using the same `postgres-credentials`
-Secret the app already uses. `k8s/postgres-service.yaml` exposes it on a `metrics` port (`9187`)
-alongside Postgres' own `5432`, and Prometheus (running in the separate `observability` namespace)
-scrapes it cross-namespace via `postgres.default.svc.cluster.local:9187`.
+[`postgres_exporter`](https://github.com/prometheus-community/postgres_exporter) runs as its own
+`postgres-exporter` Deployment in `default` (`k8s/postgres.yaml`), connecting to Cloud SQL's private
+IP (from the `cloudsql-connection` Secret) with the same `postgres-credentials` the app uses, over
+TLS (`sslmode=require` - Cloud SQL is `ENCRYPTED_ONLY`). Prometheus (in `observability`) scrapes it
+cross-namespace via `postgres-exporter.default.svc.cluster.local:9187`. Keeping the exporter means
+the Grafana dashboards don't care where Postgres runs; Cloud SQL's own metrics (CPU, disk,
+connections) are in Cloud Monitoring as well.
 
 **Ops metrics** come from postgres_exporter's built-in collectors, enabled by default: connection
 counts and per-state breakdown (`pg_stat_activity_count`), transaction/tuple rates and cache hit
 ratio (`pg_stat_database_*`), lock counts by mode (`pg_locks_count`), and checkpoint/buffer activity
 (`pg_stat_bgwriter_*`) - note the `stat_` infix; there is no bare `pg_bgwriter_*` metric.
 
-**Query metrics** need the `pg_stat_statements` extension, which isn't in Postgres by default:
+**Query metrics** need `pg_stat_statements`:
 
-1. The `postgres` container's startup args add `shared_preload_libraries=pg_stat_statements` (must
-   happen at server start, not via SQL) and `pg_stat_statements.track=all` (also count statements
-   run inside functions).
+1. Cloud SQL preloads the library; the Composition sets the `pg_stat_statements.track=all` database
+   flag (also count statements run inside functions).
 2. `CREATE EXTENSION IF NOT EXISTS pg_stat_statements` is issued by the first Alembic revision
-   (`migrations/versions/0001_initial_schema.py`) - it attaches to that already-preloaded library on
-   first deploy.
-
+   (`migrations/versions/0001_initial_schema.py`) - `message_app` may do that on Cloud SQL because
+   users created through the Cloud SQL API are members of `cloudsqlsuperuser`.
 3. The exporter's `--collector.stat_statements` flag (plus `--collector.stat_statements.include_query`
    for a `queryid` -> SQL-text mapping) exposes per-`queryid` call count, total time, and rows via
    `pg_stat_statements_calls_total` / `_seconds_total` / `_rows_total` - the numeric metrics are
@@ -675,13 +675,10 @@ ratio (`pg_stat_database_*`), lock counts by mode (`pg_locks_count`), and checkp
    `pg_stat_statements_query_id` is the separate `queryid` -> `query` lookup table, capped at the
    top 20 statements and 1024 characters each by the exporter's own defaults.
 
-If you change the postgres container's startup args or the `postgres-exporter` sidecar, the
-StatefulSet needs `kubectl apply -k k8s/` (it's part of the main Kustomization, not
-`k8s/observability/`); an Alembic migration change needs the app image rebuilt and redeployed (see
-"Pushing a code change to the running cluster" above) since `alembic upgrade head` runs from the
-image's own `migrations/` directory. Prometheus config changes need a `kubectl rollout
-restart deployment/prometheus -n observability` too - it has no `--web.enable-lifecycle` reload
-endpoint wired up, so it only reads `prometheus.yml` at startup.
+An Alembic migration change needs the app image rebuilt and redeployed (see "Pushing a code change
+to the running cluster" above) since `alembic upgrade head` runs from the image's own
+`migrations/` directory. Prometheus config changes roll the Prometheus pod automatically (its
+ConfigMap is generated with a content hash - see `k8s/observability/kustomization.yaml`).
 
 
 ### Hazelcast Metrics (JMX exporter)
@@ -690,7 +687,7 @@ Hazelcast's own [Management Center has a built-in Prometheus exporter](https://d
 (`hazelcast.mc.prometheusExporter.enabled`), but it turned out to be an **Enterprise-licensed
 feature** - confirmed live by deploying Management Center and getting `402 LICENSE_REQUIRED` from
 its `/metrics` endpoint, not just by reading the docs. Rather than requiring a paid license for a
-local dev cluster, `k8s/hazelcast-deployment.yaml` instead attaches
+dev cluster, `k8s/hazelcast-deployment.yaml` instead attaches
 [`jmx_prometheus_javaagent`](https://github.com/prometheus/jmx_exporter) directly to the Hazelcast
 member's own JVM - a free, open-source, in-process javaagent (no separate Hazelcast license, no
 remote JMX/RMI port needed) that reads the member's JMX MBeans and re-exposes them as Prometheus
@@ -814,7 +811,7 @@ Every script supports the same environment variables:
 | :--- | :--- | :--- |
 | `VUS` | Number of concurrent virtual users | `10` |
 | `DURATION` | Duration of the test run (e.g. `10s`, `1m`) | `10s` |
-| `BASE_URL` | Target base URL (no trailing slash) | `http://localhost` |
+| `BASE_URL` | Target base URL (no trailing slash) | `https://api.miqui.dev` |
 
 **Built-in Thresholds:**
 - `http_req_failed`: error rate must remain below 1% (`rate<0.01`).
@@ -869,7 +866,7 @@ error to either caller.
 the caller to send back the version it read:
 
 ```bash
-curl -X PATCH http://localhost/messages/<id> -H 'Content-Type: application/json' \
+curl -X PATCH https://api.miqui.dev/messages/<id> -H 'Content-Type: application/json' \
   -d '{"content": "New content", "version": 3}'
 ```
 
@@ -943,7 +940,7 @@ optional query parameters:
 | `offset` | Number of items to skip | `0` | `>= 0` |
 
 ```bash
-curl 'http://localhost/messages?limit=20&offset=40'
+curl 'https://api.miqui.dev/messages?limit=20&offset=40'
 ```
 
 `totalCount` carries the *total* row count, independent of `limit`/`offset`, so a client can compute

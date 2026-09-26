@@ -24,7 +24,7 @@ central Deployment, this one has to run on every node to read the node's files.
 ## How it works
 
 - **Scope: `default` namespace only** (`include: /var/log/pods/default_*/*/*.log`). Collecting every
-  pod (ingress-nginx, argocd, kube-system, …) would risk OpenObserve's 5Gi PVC and single-node
+  pod (argocd, kube-system, crossplane-system, …) would risk OpenObserve's 5Gi PVC and single-node
   MemTable — the same failure described in `PROMETHEUS.md` step 1. Widen it deliberately, not by
   accident. This also means the collector never reads its own logs (it is in `observability`).
 - **`container` operator** parses the CRI line format (`<time> stdout F <message>`), re-joins lines
@@ -59,7 +59,7 @@ order by _timestamp desc
 
 `observability` is audit-only, so nothing here is blocked, but the DaemonSet would show up in the
 PolicyReports twice: a `hostPath` volume (`disallow-host-access`) and running as root
-(`require-secure-container-context`). Root is required — on the kind nodes `/var/log/pods` is
+(`require-secure-container-context`). Root is required — on the GKE nodes `/var/log/pods` is
 `root:root 0750` and the files are `0640`. `k8s/policies/exceptions/log-collector.yaml` exempts it
 from those two audit rules, like `node-exporter.yaml` does; the rest of its `securityContext`
 (no privilege escalation, drop ALL, RuntimeDefault seccomp, read-only root filesystem, read-only
@@ -87,7 +87,7 @@ credentials are never logged.
 
 ## Verification (live, 2026-09-23)
 
-On a fresh kind cluster running the real image, after running the k6 scripts: `pod_logs` held
+On the earlier local cluster running the real image, after running the k6 scripts: `pod_logs` held
 32,471 rows from message-service pods, of which 32,053 carried a `trace_id` in their JSON `body`,
 and the startup line (`{"message": "message-service started", "api_docs_enabled": true, ...,
 "logger": "app.main"}`) was searchable. Earlier (2026-09-21), marker lines written with
@@ -100,8 +100,8 @@ To repeat it:
 kubectl exec -n default deploy/message-service -c message-service -- \
   sh -c 'echo "log-shipping-smoke-test from $HOSTNAME" > /proc/1/fd/1'
 
-U=$(kubectl get secret openobserve -n observability -o jsonpath='{.data.ZO_ROOT_USER_EMAIL}' | base64 -d)
-P=$(kubectl get secret openobserve -n observability -o jsonpath='{.data.ZO_ROOT_USER_PASSWORD}' | base64 -d)
+U=$(kubectl get secret openobserve-root-credentials -n observability -o jsonpath='{.data.ZO_ROOT_USER_EMAIL}' | base64 -d)
+P=$(kubectl get secret openobserve-root-credentials -n observability -o jsonpath='{.data.ZO_ROOT_USER_PASSWORD}' | base64 -d)
 kubectl port-forward -n observability svc/openobserve 15080:5080 &
 END=$(python3 -c "import time;print(int(time.time()*1e6))"); START=$((END-900000000))
 curl -s -u "$U:$P" -X POST "http://localhost:15080/api/default/_search?type=logs" \
@@ -111,17 +111,16 @@ curl -s -u "$U:$P" -X POST "http://localhost:15080/api/default/_search?type=logs
 
 ## Gotchas
 
-- **Config changes need a restart** — the collector doesn't hot-reload:
-  `kubectl rollout restart ds/log-collector -n observability`. Lines logged before the restart
-  finishes are skipped (`start_at: end`).
+- **Config changes roll the DaemonSet** — the collector doesn't hot-reload, but its ConfigMap is
+  generated with a content hash, so a merged config change rolls the pods by itself. Lines logged
+  while a pod restarts are skipped (`start_at: end`).
 - **Nothing arriving?** `kubectl logs -n observability ds/log-collector` — parse errors
   (`failed to process token`) and export errors (401/400 from OpenObserve) show there. An empty
   `pod_logs` stream with a healthy collector usually just means the pods haven't logged since it
   started.
 - **Stream stats lag** — `GET /api/default/streams?type=logs` can show `doc_num: 0` while rows are
   already searchable; search instead.
-- **Not ArgoCD-managed**: `k8s/observability/` is applied by `deploy-kind.sh` (`kubectl apply -k`),
-  not synced by ArgoCD, so changes here are applied by hand on a running cluster. Only
-  `k8s/policies/` (the exception) is synced.
-- **Adding a namespace**: change the `include` glob, and check the DaemonSet's `nodeAffinity` still
-  covers the nodes those pods run on.
+- **ArgoCD-managed**: `k8s/observability/` is the `observability` Application - change it in git
+  and merge; hand edits are reverted by self-heal.
+- **Adding a namespace**: change the `include` glob. The DaemonSet runs on every node, so no
+  scheduling change is needed.

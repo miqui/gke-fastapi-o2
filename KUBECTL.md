@@ -3,36 +3,43 @@
 `kubectl` commands used while adding OpenObserve observability for the message REST API,
 grouped by phase.
 
-## From `deploy-kind.sh` (the automated deployment)
+## Cluster access and platform status (GKE)
 
 ```bash
-kubectl config use-context "kind-${CLUSTER_NAME}"
-kubectl apply -f https://raw.githubusercontent.com/kubernetes/ingress-nginx/controller-v1.11.3/deploy/static/provider/kind/deploy.yaml
-kubectl wait --namespace ingress-nginx --for=condition=ready pod --selector=app.kubernetes.io/component=controller --timeout=120s
-kubectl apply -k k8s/observability/
-kubectl apply -k k8s/
-kubectl rollout status statefulset/postgres --timeout=120s
-kubectl rollout status deployment/hazelcast --timeout=120s
-kubectl rollout status deployment/otel-collector -n observability --timeout=120s
-kubectl rollout status deployment/prometheus -n observability --timeout=120s
-kubectl rollout status deployment/grafana -n observability --timeout=120s
-kubectl rollout status statefulset/openobserve -n observability --timeout=180s
+gcloud container clusters get-credentials dev-cluster --zone=us-central1-a --project=k8s-dev-412419
+kubectl config current-context          # gke_k8s-dev-412419_us-central1-a_dev-cluster
+kubectl get nodes -o wide
+
+# Everything is an Argo CD Application (see ARGOCD.md)
+kubectl get applications -n argocd -o custom-columns='NAME:.metadata.name,WAVE:.metadata.annotations.argocd\.argoproj\.io/sync-wave,SYNC:.status.sync.status,HEALTH:.status.health.status'
+
+# Cloud SQL via Crossplane
+kubectl get postgresinstance messagedb                  # INSTANCE / PRIVATE-IP columns
+kubectl get managed                                     # every Crossplane managed resource
+kubectl get providers.pkg.crossplane.io,functions.pkg.crossplane.io
+kubectl describe databaseinstances.sql.gcp.m.upbound.io # provisioning errors show up here
+
+# Secrets from Secret Manager
+kubectl get externalsecrets -A                          # STATUS should be SecretSynced
+kubectl get clustersecretstore gcp-secret-manager
+
+# Public entry point
+kubectl get gateway api -o wide                         # PROGRAMMED=True, ADDRESS=api-ip
+kubectl describe httproute api
+kubectl get healthcheckpolicy,gcpgatewaypolicy
+
+# Workloads
 kubectl rollout status deployment/message-service --timeout=180s
-kubectl get nodes -L workload -o wide
-kubectl get pods -l app=postgres -o wide
-kubectl get pods -l app=hazelcast -o wide
-kubectl get pods -l app=message-service -o wide
-kubectl get svc message-service
+kubectl get pods -o wide
 kubectl get pods -n observability -o wide
+kubectl get networkpolicy -A
 ```
 
-## Manual investigation (diagnosing why ingress-nginx wasn't ready)
+## Tools (port-forward only)
 
 ```bash
-kubectl config use-context kind-kind-fastapi-cluster
-kubectl get nodes -o wide
-kubectl get pods -n ingress-nginx -o wide
-kubectl describe pod -n ingress-nginx -l app.kubernetes.io/component=controller
+./gke-port-forward.sh                   # all of them; or e.g. ./gke-port-forward.sh grafana
+kubectl port-forward -n observability svc/prometheus 9090:9090   # the same, by hand
 ```
 
 ## Manual verification (Prometheus remote_write → OpenObserve)
@@ -116,8 +123,8 @@ kubectl get pods --all-namespaces -o wide
 ```
 
 Turned out both counts were correct: `kubectl`/Headlamp count all 50 pod objects, while Grafana's
-panel filters on `phase="Running"`, excluding the 2 `Completed` `ingress-nginx-admission-*` Job pods
-(50 − 2 = 48).
+panel filters on `phase="Running"`, excluding 2 `Completed` Job pods (50 − 2 = 48). Same idea
+applies on GKE: `Completed`/`Succeeded` pods (hook Jobs, Trivy scan Jobs) are in one count, not the other.
 
 ## Diagnosing `argocd-repo-server` liveness probe failures
 
@@ -146,36 +153,15 @@ kubectl logs -n argocd deploy/argocd-repo-server --since=1h | jq -r '[.time,.lev
 
 The tell-tale line is `Error serving health check request ... context canceled` with
 `"duration":5004874461`: the health check normally answers in about 1ms, and here it ran into the
-probe's `timeoutSeconds: 5`. That points at a stall around the process (CPU or memory contention in
-the Docker VM), not at repo-server being slow.
-
-Checking the Docker Desktop VM (kind runs inside it):
+probe's `timeoutSeconds: 5`. That points at a stall around the process (CPU or memory contention on
+the node), not at repo-server being slow. This was seen on the earlier, heavily packed local cluster;
+on GKE check node pressure first:
 
 ```bash
-docker info | grep -E 'CPUs|Total Memory'
-docker stats --no-stream
-docker run --rm --privileged --pid=host alpine sh -c 'cat /proc/pressure/cpu /proc/pressure/memory /proc/pressure/io; free -m'
 kubectl top nodes
+kubectl describe node <node> | grep -A8 'Allocated resources'
 ```
 
-In the PSI output, `some avg60` above roughly 10% on `cpu` means tasks are regularly waiting for CPU,
-and swap in use on the `free -m` line means pages are being swapped out. Both were true here
-(CPU `some` ~17%, ~465 MB swapped). The fix is more VM memory (Docker Desktop → Settings →
-Resources) and/or fewer kind workers.
-
-Restarts were frequent enough to be a nuisance, so `deploy-kind.sh` now applies this patch right
-after installing ArgoCD (alongside the `argocd-server --insecure` patch): it loosens the liveness
-probe (about 60s of tolerated stall instead of about 15s) and gives the container a CPU/memory
-request, moving it from BestEffort to Burstable QoS so it's less likely to be starved in the first
-place:
-
-```bash
-kubectl patch deployment argocd-repo-server -n argocd --type=json -p='[
-  {"op":"replace","path":"/spec/template/spec/containers/0/livenessProbe/timeoutSeconds","value":10},
-  {"op":"replace","path":"/spec/template/spec/containers/0/livenessProbe/failureThreshold","value":6},
-  {"op":"add","path":"/spec/template/spec/containers/0/resources","value":{"requests":{"cpu":"100m","memory":"256Mi"}}}
-]'
-```
-
-This treats the symptom, not the cause - the underlying fix is still more Docker Desktop VM memory
-(Settings → Resources) and/or fewer kind workers if PSI shows real contention.
+If it recurs, give `argocd-repo-server` a CPU/memory request (and, if needed, a looser liveness
+probe) through `repoServer.resources` / `repoServer.livenessProbe` in `k8s/argocd/argocd-values.yaml`
+- Argo CD manages its own chart, so a hand `kubectl patch` would just be reverted.

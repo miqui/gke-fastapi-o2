@@ -1,16 +1,16 @@
 # API Examples
 
 Example `curl` calls against the message-service REST API, ordered simple to complex. All of them
-target the local ingress at `http://localhost` (use `http://localhost:8080` for a local
+target the public endpoint `https://api.miqui.dev` (use `http://localhost:8080` for a local
 `python -m app` run). See [README.md](README.md#rest-api) for the endpoint summary and
 [API-DESIGN.md](API-DESIGN.md) for the status codes, validation rules and error model. With
-`API_DOCS_ENABLED=true` the same API is browsable at `http://localhost/docs`.
+`API_DOCS_ENABLED=true` the same API is browsable at `https://api.miqui.dev/docs`.
 
 Replace placeholder IDs (`<AUTHOR_ID>`, `<MESSAGE_ID>`) with real ones from your own data - run
 example 1 first to find some. Every example uses `jq` to pretty-print; drop `| jq` if you don't have it.
 
 ```bash
-BASE=http://localhost
+BASE=https://api.miqui.dev
 ```
 
 ---
@@ -177,7 +177,7 @@ curl -s -i -X DELETE "$BASE/authors/<AUTHOR_ID>"
 ```bash
 #!/usr/bin/env bash
 set -euo pipefail
-BASE=http://localhost
+BASE=https://api.miqui.dev
 
 # Create an author and a message.
 AUTHOR_ID=$(curl -s -X POST "$BASE/authors" -H 'Content-Type: application/json' \

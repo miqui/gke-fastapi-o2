@@ -1,6 +1,6 @@
 # ArgoCD — commands & troubleshooting
 
-Day-to-day ArgoCD commands for this repo's local kind cluster. Everything is `kubectl`-based: the
+Day-to-day ArgoCD commands for this repo's GKE dev cluster. Everything is `kubectl`-based: the
 `argocd` CLI isn't installed here (an optional CLI section is at the end). For the design — what
 ArgoCD owns and why — see the "Continuous Deployment with ArgoCD" section of `README.md`; for
 `argocd-repo-server` liveness-probe failures see `KUBECTL.md`.
@@ -10,23 +10,33 @@ kubectl usage that I did not run here.
 
 ## What's in the cluster
 
-| Thing | Name | Defined in |
+Everything is an Application, created by the `root` Application (app of apps) from
+`k8s/argocd/apps/`; `gke-bootstrap.sh` only Helm-installs Argo CD and applies
+`k8s/argocd/root-application.yaml`.
+
+| Application | Wave | Owns |
 | :--- | :--- | :--- |
-| Application: `default` namespace (Postgres, Hazelcast, message-service, Ingress, quotas) | `fastapi-o2` | `k8s/argocd/application.yaml`, syncs `k8s/` |
-| Application: Kyverno policies + PolicyExceptions | `kyverno-policies` | `k8s/argocd/policies-application.yaml`, syncs `k8s/policies/` |
-| Application: observability stack (OTel Collector, Prometheus, Grafana + dashboards, kube-state-metrics, node-exporter, log collector, the namespace) | `observability` | `k8s/argocd/observability-application.yaml`, syncs `k8s/observability/` |
-| Application: Trivy Operator (upstream Helm chart + values from this repo, into `trivy-system`) | `trivy-operator` | `k8s/argocd/trivy-operator-application.yaml`, chart `aqua/trivy-operator` + `$values/k8s/trivy-operator/` - see [TRIVY.md](TRIVY.md) |
-| Image Updater config | `ImageUpdater/fastapi-o2` | `k8s/argocd/image-updater.yaml` |
-| UI | `http://argocd.localhost/` | `k8s/argocd/ingress.yaml` |
+| `root` | - | every file in `k8s/argocd/apps/` |
+| `argocd` | -4 | Argo CD itself (chart `argo/argo-cd` + `k8s/argocd/argocd-values.yaml`); never prunes |
+| `external-secrets` | -4 | External Secrets Operator (chart + `k8s/external-secrets/values.yaml`) |
+| `crossplane` | -4 | Crossplane core (chart + `k8s/crossplane/values.yaml`) |
+| `kyverno` | -3 | Kyverno (chart + `k8s/kyverno/kyverno-values.yaml`) |
+| `platform` | -3 | `k8s/platform/`: ClusterSecretStore, Crossplane GCP SQL provider/functions/ClusterProviderConfig, `PostgresInstance` XRD + Composition |
+| `kyverno-policies` | -2 | `k8s/policies/` |
+| `observability` | -1 | `k8s/observability/` (OTel Collector, Prometheus, Grafana + dashboards, kube-state-metrics, node-exporter, log collector, ExternalSecrets, NetworkPolicies, the namespace) |
+| `headlamp` | -1 | chart + `k8s/headlamp/headlamp-values.yaml` + `k8s/headlamp/manifests/` |
+| `trivy-operator` | -1 | chart + `k8s/trivy-operator/trivy-operator-values.yaml` - see [TRIVY.md](TRIVY.md) |
+| `argocd-image-updater` | -1 | chart + `k8s/argocd/image-updater-values.yaml` + the `ImageUpdater` CR in `k8s/argocd/image-updater/` |
+| `openobserve` | 0 | chart + `k8s/observability/openobserve-values.yaml` |
+| `fastapi-o2` | 1 | `k8s/`: `PostgresInstance`, message-service, Hazelcast, postgres-exporter, Gateway, NetworkPolicies, quota |
 
-All three Applications track `main` with `automated: {prune: true, selfHeal: true}`. **Not** managed by
-ArgoCD: OpenObserve, Headlamp and Kyverno themselves (all Helm installs done by `deploy-kind.sh`;
-only the Kyverno *policies* are an Application).
+All track `main` with `automated: {prune: true, selfHeal: true}` (except `argocd`: no prune). UI:
+`./gke-port-forward.sh argocd` -> `https://localhost:8081`.
 
-ArgoCD components in the `argocd` namespace: `argocd-server`, `argocd-repo-server`,
-`argocd-redis`, `argocd-dex-server`, `argocd-applicationset-controller`,
-`argocd-notifications-controller`, `argocd-image-updater-controller` (Deployments) and
-`argocd-application-controller` (StatefulSet).
+Three `argocd-cm` customizations in `argocd-values.yaml` matter for this layout: the Application
+health check (without it sync waves wouldn't wait for a child to be Healthy), Crossplane health checks
+(so Cloud SQL provisioning shows as Progressing, not Healthy), and `controller.diff.server.side`
+(client-side diff misreads the big server-side-applied CRDs as permanently OutOfSync).
 
 ## Status
 
@@ -79,9 +89,11 @@ syncs by itself.
 
 ## Image Updater
 
-CI pushes `docker.io/miqui/<service>:<yyyymmddHHMMSS>-<sha7>`; Image Updater picks the newest tag
-(`alphabetical` strategy) roughly every 2 minutes and writes it into the Application — **no git
-commit is made**.
+CI pushes `us-central1-docker.pkg.dev/k8s-dev-412419/api-images/rest-message-api:<yyyymmddHHMMSS>-<sha7>`;
+Image Updater picks the newest tag (`alphabetical` strategy) roughly every 2 minutes and writes it
+into the Application — **no git commit is made**. It reads Artifact Registry with a short-lived
+token from the GKE metadata server (Workload Identity, `argocd-image-updater` GSA, read-only); the
+root Application ignores `/spec/source/kustomize` on `fastapi-o2` so it doesn't revert the update.
 
 ```bash
 # the tag each service is currently pinned to (the override lives on the Application, not in git)
@@ -124,14 +136,11 @@ While paused, `kubectl get application …` will show `OutOfSync` for anything y
 
 ## Drift you should expect
 
-`postgres-credentials` is a committed placeholder (`k8s/secret.yaml`) that `deploy-kind.sh`
-overwrites with real values. `application.yaml` tells ArgoCD to ignore that Secret's data
-(`ignoreDifferences` + `RespectIgnoreDifferences=true`), so it never shows as `OutOfSync` and a sync
-never puts the placeholder back.
+**Secrets don't drift.** Git holds `ExternalSecret`s, not Secrets; External Secrets owns the actual
+Secrets (built from GCP Secret Manager), so there's no placeholder for a sync to write back.
 
-`grafana-credentials` and `openobserve-remote-write-credentials` (the `observability` Application) are the
-same story: committed placeholders that `deploy-kind.sh` overwrites, ignored via `ignoreDifferences`
-+ `RespectIgnoreDifferences=true` in `observability-application.yaml`.
+**The image tag** on `fastapi-o2` differs from git on purpose (Image Updater's override); the root
+Application ignores that field.
 
 **Hash-suffixed ConfigMaps.** `prometheus-config-<hash>`, `otel-collector-config-<hash>` and
 `log-collector-config-<hash>` are generated by kustomize (`configMapGenerator` in
@@ -149,25 +158,8 @@ unmerged branch is undone on the next reconcile. Change it in git and merge inst
 **The `observability` namespace is never pruned** (`argocd.argoproj.io/sync-options: Prune=false` in
 `k8s/observability/namespace.yaml`): deleting the namespace would take OpenObserve's PVC with it.
 
-**One-time bootstrap on an existing cluster** (a fresh `deploy-kind.sh` does this itself): the
-Application can't create itself, so after the PR that adds it is merged:
-
-```bash
-kubectl apply -f k8s/argocd/observability-application.yaml
-kubectl get application observability -n argocd   # expect Synced; Argo adopts the existing objects
-```
-
-Adoption changes only the Namespace annotation, swaps the three ConfigMaps for their hash-named copies,
-and rolls Prometheus, the OTel Collector and the log collector once (their volume reference changed).
-
-Argo only prunes objects it has tracked, and the pre-existing un-suffixed `prometheus-config`,
-`otel-collector-config` and `log-collector-config` were applied by kubectl, so they are left behind as
-unreferenced orphans. Once the three workloads have rolled, remove them by hand (a fresh cluster never
-has them):
-
-```bash
-kubectl delete configmap prometheus-config otel-collector-config log-collector-config -n observability
-```
+**Adding a new Application**: add a file to `k8s/argocd/apps/` (with a sync-wave annotation) and
+merge - the root Application picks it up. Nothing is applied by hand.
 
 ## Rolling back
 
@@ -200,9 +192,13 @@ kubectl get events -n argocd --sort-by=.lastTimestamp
 ```
 
 **Merged but nothing changed.** In order: is `.status.sync.revision` the merge commit yet (poll
-delay, or a `ComparisonError` above)? Is the change under `k8s/` at all — `k8s/observability/` is
-**not** synced and must be applied by hand? For a new image: did CI push it, and does the
-Image Updater log show `images_updated=1`?
+delay, or a `ComparisonError` above)? Is the file actually referenced - listed in its directory's
+`kustomization.yaml`, or in a directory an Application syncs? For a new image: did CI push it, and
+does the Image Updater log show `images_updated=1`?
+
+**A wave is stuck.** `kubectl get applications -n argocd`: the root Application only starts wave N+1
+once every wave-N Application is Healthy. `fastapi-o2` staying Progressing for ~15 minutes on a fresh
+cluster is Cloud SQL being created (`kubectl get postgresinstance,managed`).
 
 **Stuck `Progressing` / `Degraded`.** Find the resource with the per-resource query above, then
 debug that resource (`kubectl describe`, `kubectl get events`). A Deployment rejected by Kyverno in
@@ -214,20 +210,18 @@ ArgoCD applies them — see the "Working with the policies" section of `README.m
 ## Login
 
 ```bash
-# UI: http://argocd.localhost/  - user admin, password:
+./gke-port-forward.sh argocd       # https://localhost:8081 (self-signed cert), user admin, password:
 kubectl -n argocd get secret argocd-initial-admin-secret -o jsonpath='{.data.password}' | base64 -d; echo
 ```
 
-(`argocd-initial-admin-secret` exists on this cluster ✅; ArgoCD's docs recommend deleting it after
-you change the password.)
+(ArgoCD's docs recommend deleting `argocd-initial-admin-secret` after you change the password.)
 
 ## Optional: the `argocd` CLI
 
-Not installed here, and none of the commands below were run. `argocd-server` is patched with
-`--insecure` and reached through the plain-HTTP `*.localhost` Ingress, hence the flags:
+Not installed here, and none of the commands below were run. With the port-forward above running:
 
 ```bash
-argocd login argocd.localhost --plaintext --grpc-web --username admin
+argocd login localhost:8081 --insecure --grpc-web --username admin   # --insecure: self-signed cert
 
 argocd app list
 argocd app get fastapi-o2

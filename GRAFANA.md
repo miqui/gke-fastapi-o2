@@ -56,7 +56,7 @@ are empty until the image is running and has served traffic.
 
 ### Verification performed
 
-Run on a fresh kind cluster with the real image (the manifests applied with `kubectl apply -k`
+Run on the earlier local cluster with the real image (the manifests applied with `kubectl apply -k`
 rather than through Argo, since nothing was pushed to `main`), after generating traffic with the k6
 scripts:
 
@@ -135,18 +135,21 @@ This dashboard depends on two other changes, covered in their own docs:
 
 ## Unrelated finding: admin credentials had drifted
 
-While verifying the dashboard via Grafana's API, `admin`/`admin` (the credentials documented in
-`k8s/observability/grafana-secret.yaml` and the README) returned `401 Invalid username or
+While verifying the dashboard via Grafana's API, `admin`/`admin` (the credentials then documented in the committed
+placeholder Secret and the README) returned `401 Invalid username or
 password` — confirmed via pod logs (`password-auth.invalid`) that this was a genuine credential
 mismatch, not a transient issue. The Grafana pod hadn't restarted since its original deploy, so
 something changed the in-database admin password outside of this session's changes.
 
 Fixed by resetting it back to the documented value using Grafana's own supported recovery path
-(safe on this disposable local dev instance):
+(safe on a disposable dev instance):
 
 ```bash
 kubectl exec -n observability deploy/grafana -- grafana-cli admin reset-admin-password admin
 ```
 
-No config files were changed for this — `grafana-secret.yaml` already had the correct value; only
-Grafana's own internal (sqlite) state was out of sync with it.
+No config files were changed for this — the Secret already had the correct value; only Grafana's
+own internal (sqlite) state was out of sync with it. Today the admin credentials come from Secret
+Manager via the `grafana-credentials` ExternalSecret; `grafana-cli admin reset-admin-password
+"$(kubectl -n observability get secret grafana-credentials -o jsonpath='{.data.GF_SECURITY_ADMIN_PASSWORD}' | base64 -d)"`
+re-syncs Grafana's database with it if this ever recurs.
