@@ -6,7 +6,8 @@
 #      to be gone - deleting the cluster first would orphan them, still billing
 #   2. GKE cluster
 #   3. Leftovers: any Cloud SQL instance this platform labelled, the load balancer's forwarding
-#      rule on api-ip
+#      rule on api-ip, network endpoint groups in the VPC, and the PVCs' persistent disks (a
+#      cluster deletion leaves both behind)
 #   4. Private Service Access peering + range, static IP, SSL policy, Cloudflare A record
 #   5. Firewall rules in the VPC, Cloud NAT, Cloud Router, subnet, VPC
 #
@@ -84,7 +85,8 @@ About to DELETE the following resources in project '$PROJECT_ID':
   Cloud SQL            : the platform's instance(s) - ALL DATA IS LOST (no backups are kept)
   Load balancer        : Gateway for $API_HOST, static IP $IP_NAME, SSL policy $SSL_POLICY
   GKE cluster          : $CLUSTER (zone $ZONE)
-  Network              : PSA peering/range, firewall rules, $NAT / $ROUTER, $SUBNET / $VPC
+  Persistent disks     : the PVCs' disks (OpenObserve, Trivy) - their data is lost
+  Network              : NEGs, PSA peering/range, firewall rules, $NAT / $ROUTER, $SUBNET / $VPC
   DNS                  : A record $API_HOST (if CLOUDFLARE_API_TOKEN is set)
 EOF
 if [[ "$PURGE" -eq 1 ]]; then
@@ -164,6 +166,35 @@ if [[ -n "$API_IP" ]]; then
   else
     echo "    none"
   fi
+fi
+
+# Container-native load balancing leaves zonal network endpoint groups (one per Service port)
+# behind when the cluster goes before the NEG controller has cleaned up; any NEG in this VPC
+# blocks deleting it ("is already being used by .../networkEndpointGroups/k8s1-...").
+log "Checking for leftover network endpoint groups in $VPC"
+LEFTOVER_NEG=$(gcloud compute network-endpoint-groups list --filter="network~/${VPC}\$" \
+  --format='value(name,zone.basename())' 2>/dev/null || true)
+if [[ -n "$LEFTOVER_NEG" ]]; then
+  while read -r neg zone; do
+    gcloud compute network-endpoint-groups delete "$neg" --zone="$zone" --quiet
+  done <<<"$LEFTOVER_NEG"
+else
+  echo "    none"
+fi
+
+# Deleting a GKE cluster does NOT delete the persistent disks behind its PVCs (OpenObserve's
+# and the Trivy server's here); they'd keep billing. GKE labels them with the cluster name;
+# only unattached ones are touched.
+log "Checking for leftover PVC disks (label goog-k8s-cluster-name=$CLUSTER)"
+LEFTOVER_DISKS=$(gcloud compute disks list \
+  --filter="labels.goog-k8s-cluster-name=$CLUSTER AND -users:*" \
+  --format='value(name,zone.basename())' 2>/dev/null || true)
+if [[ -n "$LEFTOVER_DISKS" ]]; then
+  while read -r disk zone; do
+    gcloud compute disks delete "$disk" --zone="$zone" --quiet
+  done <<<"$LEFTOVER_DISKS"
+else
+  echo "    none"
 fi
 
 # ---- 4. PSA, edge, DNS -------------------------------------------------------------------

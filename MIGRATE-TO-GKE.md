@@ -153,6 +153,25 @@ Numbered in the order they were hit. "Commit" is the fix in this repo's history.
 - **Fix**: none needed - the next call worked (`databaseinstances`, `databases`, `users` all carry
   the `managed` category).
 
+### 14. Teardown: VPC deletion blocked by a leftover network endpoint group
+
+- **Symptom**: `gke-teardown.sh` failed at its last step: `The network resource '.../dev-vpc' is
+  already being used by '.../networkEndpointGroups/k8s1-9b8fc8cc-default-message-service-8080-...'`.
+- **Cause**: container-native load balancing creates a zonal NEG per Service port. Deleting the
+  Gateway removes the load balancer, but the NEG is garbage-collected by an in-cluster controller;
+  the cluster was deleted before that happened, orphaning it.
+- **Fix**: deleted by hand this time; `gke-teardown.sh` now deletes every NEG in the VPC after the
+  cluster is gone.
+
+### 15. Teardown: PVC persistent disks survive cluster deletion
+
+- **Symptom**: found only by validating after the teardown: two unattached 5 GB disks
+  (`pvc-...`, labelled `goog-k8s-cluster-name: dev-cluster`) - OpenObserve's and the Trivy
+  server's volumes - still existing, and billing, with no cluster.
+- **Cause**: deleting a GKE cluster doesn't delete the persistent disks behind its PVCs.
+- **Fix**: deleted by hand this time; `gke-teardown.sh` now deletes unattached disks labelled with
+  the cluster's name after the cluster is gone.
+
 ## Verified on the live cluster
 
 | What | Result |
@@ -168,6 +187,7 @@ Numbered in the order they were hit. "Commit" is the fix in this repo's history.
 | Gateway | `Programmed=True` on `34.149.147.124`; HTTP answers `301 -> https://` |
 | Tools | Argo CD, Grafana, Prometheus, OpenObserve, Headlamp all 200 through `gke-port-forward.sh` |
 | Kyverno | Enforce set passes on `k8s/`; self-test fixture rejected (locally and in CI) |
+| `gke-teardown.sh` | Gateway, Cloud SQL (via Crossplane), cluster, PSA, IP, SSL policy, firewall, NAT, router, subnet removed in order; failed at the VPC on problems 14-15 (fixed in the script, leftovers cleaned by hand). Afterwards: no cluster, SQL instance, forwarding rule, address, NEG, disk, router or VPC left; registry + images, certificate, secrets, service accounts and WIF pool kept |
 
 ## Open items
 
@@ -182,4 +202,5 @@ Numbered in the order they were hit. "Commit" is the fix in this repo's history.
 - **Hazelcast's JMX agent** is downloaded from Maven Central on every start, which is the only
   reason the `default` namespace allows egress to the internet (port 443); baking the jar into an
   image would remove that rule.
-- **`teardown` not yet exercised** on the live cluster.
+- **Re-run `gke-teardown.sh` once more** on the next cluster to confirm the NEG/disk cleanup added
+  for problems 14-15 end to end (the commands were checked against the project, not in a full run).

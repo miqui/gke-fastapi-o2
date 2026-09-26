@@ -509,7 +509,10 @@ op run --env-file=.env -- ./gke-secrets-seed.sh
   **waits for both** - deleting the cluster first would leave them running and billing with nothing
   managing them - then the cluster, the peering, static IP, SSL policy, the Cloudflare `A` record
   (a released IP can be handed to another customer), firewall rules, NAT, router, subnet and VPC.
-  It then double-checks for any leftover Cloud SQL instance labelled `platform=gke-fastapi-o2`.
+  After the cluster is gone it also removes what a cluster deletion leaves behind: any Cloud SQL
+  instance labelled `platform=gke-fastapi-o2`, network endpoint groups in the VPC (they block
+  deleting it), and the persistent disks behind the PVCs (OpenObserve, Trivy - they'd keep
+  billing).
   **Kept by default** (free or pennies, and slow or awkward to recreate): the Artifact Registry repo
   and its images, the certificate/map/DNS authorization, Secret Manager secrets, service accounts
   and the GitHub Workload Identity pool. `--purge` removes those too. `--yes` skips the prompt.
@@ -577,6 +580,13 @@ op run --env-file=.env -- env PROJECT_ID=k8s-dev-412419 ./gke-teardown.sh   # ad
 
 - Without `CLOUDFLARE_API_TOKEN`, **delete the Cloudflare `A` record for `api` by hand** afterwards:
   the released IP can be reassigned to another Google Cloud customer. Leave the CNAME.
+- Validate it's clean (nothing should be listed):
+  ```bash
+  gcloud container clusters list; gcloud sql instances list
+  gcloud compute disks list --filter='labels.goog-k8s-cluster-name=dev-cluster'
+  gcloud compute network-endpoint-groups list; gcloud compute networks list --filter=name=dev-vpc
+  gcloud compute addresses list; gcloud compute forwarding-rules list
+  ```
 - `--purge` also deletes the kept resources; the next build then starts again at the one-time
   prerequisites (and the GitHub Workload Identity pool ID `github` stays reserved for 30 days -
   undelete it rather than recreate: `gcloud iam workload-identity-pools undelete github --location=global`).
