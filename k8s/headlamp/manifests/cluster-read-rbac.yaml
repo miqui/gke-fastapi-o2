@@ -1,6 +1,8 @@
 # Read-only access to cluster-scoped resources for Headlamp's ServiceAccount. The built-in `view`
 # ClusterRole (bound by the chart, see headlamp-values.yaml) only covers namespaced resources, so
-# without this Headlamp's Nodes, Storage, CRD and cluster RBAC pages fail with "forbidden".
+# without this Headlamp's Nodes, Storage, CRD and cluster RBAC pages fail with "forbidden". `view`
+# also doesn't aggregate Gateway API or GKE gateway policy CRDs, which Headlamp's Gateway pages list
+# across all namespaces.
 #
 # get/list/watch only - still no Secrets (not listed here, and `view` excludes them), no exec, no
 # writes. Deliberately not `cluster-admin`, which Kyverno's restrict-cluster-admin-bindings would
@@ -33,6 +35,22 @@ rules:
     verbs: [get, list, watch]
   - apiGroups: [rbac.authorization.k8s.io]
     resources: [roles, rolebindings, clusterroles, clusterrolebindings]
+    verbs: [get, list, watch]
+  # Gateway API (Headlamp's Gateway section; k8s/gateway.yaml) and GKE's gateway policy CRDs.
+  - apiGroups: [gateway.networking.k8s.io]
+    resources:
+      - gatewayclasses
+      - gateways
+      - httproutes
+      - grpcroutes
+      - tcproutes
+      - tlsroutes
+      - udproutes
+      - referencegrants
+      - backendtlspolicies
+    verbs: [get, list, watch]
+  - apiGroups: [networking.gke.io]
+    resources: [healthcheckpolicies, gcpgatewaypolicies, gcpbackendpolicies]
     verbs: [get, list, watch]
   # CPU/memory figures on the node and pod pages (GKE ships metrics-server).
   - apiGroups: [metrics.k8s.io]

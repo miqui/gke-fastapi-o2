@@ -110,6 +110,11 @@ Numbered in the order they were hit. "Commit" is the fix in this repo's history.
 - **Fix**: `k8s/headlamp/manifests/cluster-read-rbac.yaml` - get/list/watch on nodes, PVs,
   namespaces, storage, CRDs, webhooks, RBAC objects and metrics. Verified with `kubectl auth can-i
   --as`: nodes/PVs/CRDs **yes**; Secrets, `pods/exec`, delete **no**. Commit `e367136`.
+- **Follow-up**: Headlamp's Gateway pages then failed with `httproutes.gateway.networking.k8s.io is
+  forbidden ... at the cluster scope` - `view` doesn't cover Gateway API CRDs either. Added
+  get/list/watch on `gateway.networking.k8s.io` (GatewayClasses, Gateways, *Routes,
+  ReferenceGrants, BackendTLSPolicies) and GKE's `networking.gke.io` gateway policies to the same
+  ClusterRole.
 
 ### 10. Hazelcast killed during startup (exit 143)
 
