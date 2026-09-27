@@ -13,8 +13,9 @@
 #     Secrets) plus get/list on nodes and RBAC objects (for the RBAC checks). No writes, no exec.
 
 image:
-  # Pinned (chart default is the chart's appVersion with pullPolicy Always).
-  tag: "10.2.4"
+  # Pinned (chart default is the chart's appVersion with pullPolicy Always). Fairwinds tags images
+  # with a leading `v`; the chart adds it to its appVersion default, but not to an explicit tag.
+  tag: "v10.2.4"
   pullPolicy: IfNotPresent
 
 dashboard:
