@@ -656,10 +656,11 @@ above, and only push to `main` once you're ready to deploy.
 
 A change to a manifest or chart values under `k8s/` doesn't need a CI run at all - Argo CD picks it
 up from git the next time it reconciles (or immediately with a manual "Sync"). Cluster-level
-settings (machine type, node count range, cluster flags) live in `gke-deploy.sh`; changing the node
-range on a running cluster is `gcloud container clusters update dev-cluster --zone=us-central1-a
---enable-autoscaling --min-nodes=N --max-nodes=M`, while flags that only apply at creation
-(Dataplane V2, private nodes) need a teardown and redeploy.
+settings (machine type, node boot disk size, node count range, cluster flags) live in
+`gke-deploy.sh`; changing the node range on a running cluster is `gcloud container clusters update
+dev-cluster --zone=us-central1-a --enable-autoscaling --min-nodes=N --max-nodes=M`, while flags
+that only apply at creation (Dataplane V2, private nodes, node boot disk size -
+`NODE_DISK_SIZE_GB`, default 30) need a teardown and redeploy.
 
 `gke-deploy.sh` and `gke-bootstrap.sh` point your current `kubectl` context at the cluster
 (`gke_k8s-dev-412419_us-central1-a_dev-cluster`). For a standalone kubeconfig - e.g. to hand to

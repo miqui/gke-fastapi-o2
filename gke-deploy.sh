@@ -24,7 +24,8 @@
 #   op run --env-file=.env -- env PROJECT_ID=k8s-dev-412419 ./gke-deploy.sh   # with DNS automation
 #
 # Overridable env vars: REGION, ZONE, CLUSTER, VPC, SUBNET, ROUTER, NAT, REPO, MACHINE_TYPE,
-#                       MIN_NODES, MAX_NODES, DOMAIN, API_HOST, GITHUB_REPO, CLOUDFLARE_API_TOKEN
+#                       MIN_NODES, MAX_NODES, NODE_DISK_SIZE_GB, DOMAIN, API_HOST, GITHUB_REPO,
+#                       CLOUDFLARE_API_TOKEN
 set -euo pipefail
 trap 'echo "ERROR: failed at line $LINENO (exit $?)" >&2' ERR
 cd "$(dirname "$0")"
@@ -42,6 +43,9 @@ REPO="${REPO:-api-images}"
 MACHINE_TYPE="${MACHINE_TYPE:-e2-standard-2}"
 MIN_NODES="${MIN_NODES:-3}"
 MAX_NODES="${MAX_NODES:-5}"
+# Node boot disk (GKE default is 100 GB). Holds COS, system pods and all pulled images (no image
+# streaming); 30 GB is ample for this stack. Creation-time only for the default node pool.
+NODE_DISK_SIZE_GB="${NODE_DISK_SIZE_GB:-30}"
 DOMAIN="${DOMAIN:-miqui.dev}"
 API_HOST="${API_HOST:-api.${DOMAIN}}"
 GITHUB_REPO="${GITHUB_REPO:-miqui/gke-fastapi-o2}"
@@ -270,7 +274,7 @@ echo "    operator IP: $MY_IP"
 # ---- 6. GKE cluster ---------------------------------------------------------
 # These flags can only be set at creation time (dataplane v2) or are awkward to change later, so
 # an existing cluster created by an older version of this script must be recreated to pick them up.
-log "Creating cluster: $CLUSTER (zonal $ZONE, $MACHINE_TYPE, autoscaling $MIN_NODES..$MAX_NODES, private nodes)"
+log "Creating cluster: $CLUSTER (zonal $ZONE, $MACHINE_TYPE, ${NODE_DISK_SIZE_GB}GB pd-balanced, autoscaling $MIN_NODES..$MAX_NODES, private nodes)"
 if gcloud container clusters describe "$CLUSTER" --zone="$ZONE" &>/dev/null; then
   skip
 else
@@ -293,6 +297,8 @@ else
     --shielded-secure-boot \
     --shielded-integrity-monitoring \
     --machine-type="$MACHINE_TYPE" \
+    --disk-type=pd-balanced \
+    --disk-size="$NODE_DISK_SIZE_GB" \
     --num-nodes="$MIN_NODES" \
     --enable-autoscaling \
     --min-nodes="$MIN_NODES" \
