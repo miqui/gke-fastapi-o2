@@ -18,6 +18,7 @@ TOOLS=(
   "prometheus|observability|prometheus|9090|9090|http"
   "openobserve|observability|openobserve|5080|5080|http"
   "headlamp|headlamp|headlamp|4466|80|http"
+  "polaris|polaris|polaris-dashboard|8082|80|http"
 )
 
 command -v kubectl >/dev/null 2>&1 || { echo "kubectl not found" >&2; exit 1; }
@@ -71,6 +72,7 @@ Logins:
   grafana      kubectl -n observability get secret grafana-credentials -o jsonpath='{.data.GF_SECURITY_ADMIN_PASSWORD}' | base64 -d
   openobserve  kubectl -n observability get secret openobserve-root-credentials -o jsonpath='{.data.ZO_ROOT_USER_EMAIL}' | base64 -d
   headlamp     kubectl create token headlamp -n headlamp --duration=1h      (read-only)
+  polaris      none - read-only report, reachable only through this tunnel
 
 Ctrl-C to stop.
 EOF
