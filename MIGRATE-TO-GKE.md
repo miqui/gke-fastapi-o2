@@ -19,7 +19,8 @@ behind them.
 | Secrets | Placeholder Secrets in git, overwritten by the deploy script from 1Password, plus Argo CD `ignoreDifferences` | 1Password -> `gke-secrets-seed.sh` -> GCP Secret Manager -> External Secrets Operator (Workload Identity) | No secret values in git or passed through scripts |
 | Images | Docker Hub, pushed with a stored token; multi-arch | Artifact Registry, pushed **keylessly** (GitHub OIDC -> Workload Identity Federation, `main` only); amd64 only | No long-lived registry credentials |
 | Image Updater | Docker Hub read token | Artifact Registry token from the GKE metadata server (Workload Identity) via an auth script | No stored credential |
-| Network | none | Default-deny NetworkPolicies in `default` (both directions), `observability` and `headlamp` (ingress) | Enforced by Dataplane V2 |
+| Network | none | Default-deny NetworkPolicies in `default` (both directions), `observability`, `headlamp` and `polaris` (ingress) | Enforced by Dataplane V2 |
+| Best-practice report (added 2026-09-27) | none | **Polaris** dashboard (own namespace, port-forward only, chart RBAC: `view` + get/list nodes/RBAC, no Secrets), no Polaris webhook; report-only `polaris-audit.sh` in CI with the same config | Scores what's running, third-party charts included; Kyverno stays the only admission controller. Chosen over Kubevious (unmaintained since 2023, `*/*` read incl. Secrets, telemetry on by default) |
 
 Kept across teardowns: Artifact Registry + images, certificate/map/DNS authorization, Secret
 Manager secrets, service accounts, the GitHub Workload Identity pool (`gke-teardown.sh --purge`
@@ -177,6 +178,39 @@ Numbered in the order they were hit. "Commit" is the fix in this repo's history.
 - **Fix**: deleted by hand this time; `gke-teardown.sh` now deletes unattached disks labelled with
   the cluster's name after the cluster is gone.
 
+### 16. CI: `polaris-audit.sh` rendered the Polaris binary instead of the chart
+
+- **Symptom**: the first PR run of `policy-check.yml` failed in the new Polaris step: `WARN local
+  chart found in current working directory. repository url ignored chart=polaris` and `Error: file
+  '.../polaris' does not appear to be a gzipped archive`.
+- **Cause**: the install step unpacked the `polaris` CLI into the checkout, and
+  `helm template polaris polaris --repo ...` prefers a local `./polaris` over `--repo`.
+- **Fix**: the install step works in a temp dir, and the script runs `helm template` from its own
+  empty temp dir. Commit `b37da53`.
+
+### 17. Polaris dashboard in `ImagePullBackOff` (`not found`)
+
+- **Symptom**: on the 2026-09-27 rebuild the `polaris` Application stayed `Progressing`; the pod
+  failed with `us-docker.pkg.dev/fairwinds-ops/oss/polaris:10.2.4: not found`.
+- **Cause**: Fairwinds tags images with a leading `v` (`v10.2.4`). The chart adds the `v` to its
+  appVersion default, but an explicit `image.tag` is used verbatim. None of the local checks
+  (`helm template`, `kyverno apply`) resolve tags against the registry.
+- **Fix**: `image.tag: "v10.2.4"`. Commit `aa53878` (PR #3).
+
+### 18. Polaris: GKE namespaces and name-based false positives in the report
+
+- **Symptom**: the first live report showed 8 "danger" findings for GKE's own
+  `gke-managed-networking-dra-driver` DaemonSet, and `sensitiveConfigmapContent` /
+  `sensitiveContainerEnvVar` dangers on the `openobserve` and `trivy-operator-config` ConfigMaps
+  and the `crossplane` Deployment.
+- **Cause**: the exemption list was written from documentation, not from the namespaces a GKE 1.35
+  cluster actually has (`gke-managed-networking-dra-driver`, `gke-managed-volumepopulator` were
+  missing). The sensitive-content checks match on key *names*; the flagged keys were header names,
+  feature flags, empty defaults and the names of Secrets - no secret values (checked by key name
+  and length only).
+- **Fix**: both namespaces exempted; the three objects exempted from that one rule each (see the
+  comments in `k8s/polaris/polaris-values.yaml`).
+
 ## Verified on the live cluster
 
 | What | Result |
@@ -194,7 +228,20 @@ Numbered in the order they were hit. "Commit" is the fix in this repo's history.
 | Kyverno | Enforce set passes on `k8s/`; self-test fixture rejected (locally and in CI) |
 | `gke-teardown.sh` | Gateway, Cloud SQL (via Crossplane), cluster, PSA, IP, SSL policy, firewall, NAT, router, subnet removed in order; failed at the VPC on problems 14-15 (fixed in the script, leftovers cleaned by hand). Afterwards: no cluster, SQL instance, forwarding rule, address, NEG, disk, router or VPC left; registry + images, certificate, secrets, service accounts and WIF pool kept |
 
+### Rebuild of 2026-09-27 (Polaris)
+
+| What | Result |
+| --- | --- |
+| `gke-deploy.sh` | exit 0; Cloudflare `A` record upserted via the API token; certificate `api-cert` already `ACTIVE` |
+| `gke-bootstrap.sh` | All 14 Applications Synced + Healthy (Polaris after problem 17) |
+| Polaris | Application Synced/Healthy; dashboard 200 on `localhost:8082` via `gke-port-forward.sh`; Kyverno PolicyReports in `polaris` 4/4 pass; `kubectl auth can-i` for its ServiceAccount: Secrets `no`, `pods/exec` `no`, `clusterrolebindings` list `yes` (needed by the RBAC checks) |
+| Polaris report | 1381/1810 checks passing (76%) before the problem 18 exemptions. Real dangers: Argo CD's exec/attach RBAC and `cluster-admin` binding (upstream chart), privilege escalation / run-as-root in `observability`, Headlamp and Trivy |
+| CI | `policy-check.yml` runs the Polaris audit (report only); `k8s/` scores 80 |
+
 ## Open items
+
+- **Polaris findings to work through**: harden the `observability` workloads (the same gap Kyverno
+  audits), and review Argo CD's exec/attach and `cluster-admin` rights (upstream defaults).
 
 - **HTTPS on `api.miqui.dev`**: pending the recreated certificate reaching `ACTIVE` (problem 8).
 - **Rotate exposed credentials**: the Argo CD initial admin password and the Grafana/OpenObserve

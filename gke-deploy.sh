@@ -491,7 +491,7 @@ $(printf '\033[1;32mDone.\033[0m') Cluster '$CLUSTER' and its GCP foundation are
   Next:
     1. op run --env-file=.env -- env PROJECT_ID=$PROJECT_ID ./gke-secrets-seed.sh   (first time / rotation)
     2. PROJECT_ID=$PROJECT_ID ./gke-bootstrap.sh
-    3. ./gke-port-forward.sh     (Argo CD, Grafana, Prometheus, OpenObserve, Headlamp)
+    3. ./gke-port-forward.sh     (Argo CD, Grafana, Prometheus, OpenObserve, Headlamp, Polaris)
 
   If your public IP changes, re-authorize it:
     gcloud container clusters update $CLUSTER --zone=$ZONE \\

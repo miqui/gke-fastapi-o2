@@ -566,7 +566,7 @@ Workload Identity pool. So most one-time steps really are one-time.
 ```bash
 export PROJECT_ID=k8s-dev-412419
 op run --env-file=.env -- ./gke-deploy.sh      # ~10 min; without op run, DNS isn't touched
-./gke-bootstrap.sh                             # ~20-25 min; waits for all 13 Applications
+./gke-bootstrap.sh                             # ~20-25 min; waits for all 14 Applications
 ```
 
 Manual step in between, **unless** `CLOUDFLARE_API_TOKEN` is in `.env` (then the script does it):
