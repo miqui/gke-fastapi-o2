@@ -9,7 +9,7 @@
 #   -3  kyverno, platform                                         policy engine; secret store,
 #                                                                 Crossplane providers/XRD/Composition
 #   -2  kyverno-policies                                          enforce rules in place before workloads
-#   -1  observability, headlamp, trivy-operator, argocd-image-updater
+#   -1  observability, headlamp, polaris, trivy-operator, argocd-image-updater
 #    0  openobserve                                               needs observability's ExternalSecret
 #    1  fastapi-o2                                                Cloud SQL (XR), app, Gateway
 apiVersion: argoproj.io/v1alpha1

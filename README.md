@@ -36,6 +36,7 @@ through the GKE API server (locked to your IP + Google IAM) and binds on `127.0.
 | Prometheus | `http://localhost:9090` | none | Has no login of its own - which is why it's never exposed |
 | OpenObserve | `http://localhost:5080` | 1Password `ZO_ROOT_USER_EMAIL` | 1Password -> Secret Manager (`openobserve-root-email`, `openobserve-root-password`) -> `observability/openobserve-root-credentials`: `kubectl -n observability get secret openobserve-root-credentials -o jsonpath='{.data.ZO_ROOT_USER_PASSWORD}' \| base64 -d` |
 | Headlamp | `http://localhost:4466` | bearer token (read-only) | Short-lived token for Headlamp's `view`-bound ServiceAccount: `kubectl create token headlamp -n headlamp --duration=1h \| tr -d '\n' \| pbcopy` - see [Headlamp](#headlamp) |
+| Polaris | `http://localhost:8082` | none | Read-only best-practice report with no login - which is why it's port-forward only; see [Polaris](#polaris) |
 
 The UI rows are only reachable while `./gke-port-forward.sh` is running (`./gke-port-forward.sh
 grafana argocd` for a subset); it prints the same credential commands. To change the Grafana or
@@ -126,7 +127,7 @@ Secrets overwrites them.
   the OTel Collector; Hazelcast and postgres-exporter accept only their clients and Prometheus.
   DNS egress must allow the `node-local-dns` pods as well as kube-dns: GKE runs NodeLocal
   DNSCache, and on Dataplane V2 lookups go to a pod on the same node.
-  `observability` and `headlamp` are default-deny ingress. Kubelet probes and `kubectl
+  `observability`, `headlamp` and `polaris` are default-deny ingress. Kubelet probes and `kubectl
   port-forward` aren't subject to NetworkPolicy, so neither needs a rule.
 - **Secrets**: nothing secret is committed or passed through a script into the cluster. The values
   live in 1Password; `gke-secrets-seed.sh` copies them into **GCP Secret Manager**, and the
@@ -169,6 +170,14 @@ Secrets overwrites them.
   `headlamp-prometheus: "true"` label on `k8s/observability/prometheus-service.yaml` - no extra
   per-cluster config needed.
 
+  **[Polaris](https://polaris.docs.fairwinds.com/)** (`fairwinds-stable/polaris` Helm chart, own
+  `polaris` namespace, its own Argo CD Application, values in `k8s/polaris/polaris-values.yaml`)
+  scores every running workload - third-party charts included - against reliability, efficiency
+  and security best practices (probes, requests/limits, replicas/PDBs, security context, RBAC) in
+  one dashboard. It's the report-side complement to Kyverno, which decides at admission: dashboard
+  only, no Polaris admission webhook. Read-only RBAC (`view` plus get/list on nodes and RBAC
+  objects, no Secrets), port-forward only - see [Polaris](#polaris).
+
   `write_relabel_configs` in `k8s/observability/config/prometheus.yml` deliberately keeps only
   four scrape jobs - `otel-collector` (the message-service's own metrics), plus `node-exporter`,
   `kube-state-metrics`, and `kubernetes-nodes-cadvisor` (the same three jobs behind the "Cluster
@@ -195,7 +204,7 @@ Crossplane packages, managed resources and the `PostgresInstance` report their r
 | -4 | `argocd` (self-managed), `external-secrets`, `crossplane` | upstream charts + values from `k8s/argocd/`, `k8s/external-secrets/`, `k8s/crossplane/` |
 | -3 | `kyverno`, `platform` | Kyverno chart; `k8s/platform/` (secret store, Crossplane provider/functions/config, `PostgresInstance` API) |
 | -2 | `kyverno-policies` | `k8s/policies/` - enforce rules exist before any workload syncs |
-| -1 | `observability`, `headlamp`, `trivy-operator`, `argocd-image-updater` | `k8s/observability/`; charts + values |
+| -1 | `observability`, `headlamp`, `polaris`, `trivy-operator`, `argocd-image-updater` | `k8s/observability/`; charts + values |
 | 0 | `openobserve` | chart + `k8s/observability/openobserve-values.yaml` (needs the observability ExternalSecret) |
 | 1 | `fastapi-o2` | `k8s/`: `PostgresInstance`, app, Hazelcast, Gateway, NetworkPolicies |
 
@@ -247,14 +256,14 @@ examples that use it.
   rule deleted from git stops being enforced and a policy edited or deleted by hand is put back.
 - **Layout** (`k8s/policies/`): `rules/` holds each rule body once, unscoped. Two kustomize overlays
   turn them into a **Deny** copy for the `default` namespace (`overlays/enforce-default`, names get
-  an `-enforce` suffix) and an **Audit** copy for `observability` and `headlamp`
+  an `-enforce` suffix) and an **Audit** copy for `observability`, `headlamp` and `polaris`
   (`overlays/audit-other`, `-audit`) - the same rule, enforced where this repo owns and has hardened
   the workloads, report-only where it doesn't yet. `audit-only/` holds rules that only ever audit,
   and `exceptions/` the `PolicyException`s.
 
 | Policy | What it checks | Mode |
 | --- | --- | --- |
-| `disallow-host-access` | no privileged containers, `hostNetwork`/`hostPID`/`hostIPC`, `hostPath` volumes or `hostPort`s (a Pod Security Standards "baseline" subset) | Deny in `default`, Audit in `observability`/`headlamp` |
+| `disallow-host-access` | no privileged containers, `hostNetwork`/`hostPID`/`hostIPC`, `hostPath` volumes or `hostPort`s (a Pod Security Standards "baseline" subset) | Deny in `default`, Audit in `observability`/`headlamp`/`polaris` |
 | `require-secure-container-context` | every container, init containers included: `runAsNonRoot`, `allowPrivilegeEscalation: false`, drop `ALL` capabilities, `RuntimeDefault`/`Localhost` seccomp (a "restricted" subset; pod-level values count as defaults) | same |
 | `require-resources` | CPU and memory requests **and** limits on every container | same |
 | `restrict-image-repositories` | image must be on an exact-repository allowlist (tags/digests ignored; `postgres:16-alpine` is normalized to `docker.io/library/postgres`) | same |
@@ -300,6 +309,16 @@ one, create the file, list it in that directory's `kustomization.yaml`, and refe
    and the run fails if no rules loaded, a policy errors, or nothing passed - otherwise a policy that
    silently stopped matching would let the check pass vacuously.
 
+The same workflow then runs **`polaris-audit.sh`**: the Polaris checks and exemptions the
+in-cluster dashboard uses, rendered from the same chart version, against `k8s/` and
+`k8s/observability/`. It's report only - score and failed checks go to the job summary, and it
+never fails the build (Kyverno is what blocks). Locally it needs `kubectl`, `helm` and the Polaris
+CLI (`brew install FairwindsOps/tap/polaris`):
+
+```bash
+./polaris-audit.sh
+```
+
 Enforce and audit are separate runs because the Kyverno CLI exits 1 on any failure and its
 `--audit-warn` flag doesn't tell Deny from Audit for the CEL policy types. `PolicyException`s are
 passed with `--exception`: in the same file as the policies the CLI loads nothing. CI installs the
@@ -331,7 +350,7 @@ A `kubectl` cheat sheet for debugging denials, audit findings and Kyverno itself
   policies misbehave, and check `kubectl get pods -n kyverno`.
 - `restrict-image-repositories` is exact-match on the *spelling*: `index.docker.io/...` is rejected
   even though it is Docker Hub. Only images in this repo's manifests are checked in CI - the
-  Headlamp and OpenObserve charts are not rendered, so their pods are covered by the in-cluster audit
+  Headlamp, OpenObserve and Polaris charts are not rendered, so their pods are covered by the in-cluster audit
   policies only.
 - The `observability` workloads are report-only until they get their own `securityContext`s.
 - **Fail-closed on `default`.** The enforce policies keep Kyverno's default `failurePolicy: Fail`, and
@@ -655,6 +674,26 @@ kubectl get nodes
 It holds no long-lived credential - it calls `gcloud` for a fresh token - but still don't commit it
 (`.gitignore` excludes `kubeconfig.yml` by name).
 
+### Polaris
+
+`./gke-port-forward.sh polaris`, then open `http://localhost:8082`. There's no login: the report is
+read-only and the tunnel (your Google identity, your IP) is the access control.
+
+- **What it shows**: an overall score and, per namespace and workload, which checks pass or fail at
+  `warning`/`danger` severity - the built-in check set, unchanged. Findings are advice, not
+  blockers; anything that must be blocked belongs in a Kyverno policy (`k8s/policies/`).
+- **Exemptions** (`config.exemptions` in `k8s/polaris/polaris-values.yaml`): the GKE-managed
+  namespaces (`kube-system`, `gmp-*`, `gke-managed-*`, ...) are left out entirely, and
+  `node-exporter`/`log-collector` are exempt from the host-access and run-as-root checks only -
+  the same accepted violations as the Kyverno exceptions. Polaris merges this file into its
+  defaults but replaces lists wholesale, so `exemptions` there is the complete list.
+- **Access**: its ServiceAccount has the chart's RBAC - `view` plus get/list on nodes and RBAC
+  objects - so it can't read Secrets or change anything. Check with
+  `kubectl auth can-i get secrets -A --as system:serviceaccount:polaris:polaris` (`no`).
+- **Before merge**: `polaris-audit.sh` runs the same checks and exemptions, from the same chart
+  version, against `k8s/` and `k8s/observability/` - see
+  [Checking manifests before merge](#checking-manifests-before-merge).
+
 ### Headlamp
 
 Headlamp can show everything in the cluster, so it gets the least access that's still useful:
@@ -735,6 +774,8 @@ tunnels with `./gke-port-forward.sh`, then:
   look like one, e.g. `0`.)
 - **Headlamp**: `http://localhost:4466` — a general-purpose Kubernetes dashboard (not a metrics
   tool); read-only login, see [Headlamp](#headlamp).
+- **Polaris**: `http://localhost:8082` — best-practice/misconfiguration scores for every workload;
+  see [Polaris](#polaris).
 - **OTel Collector** (`k8s/observability/config/otel-collector.yaml`): receives OTLP metrics on
   `:4317` (gRPC) / `:4318` (HTTP) from every `message-service` pod
   (`OTEL_METRICS_URL` in `k8s/configmap.yaml` points at it) and re-exports them in Prometheus format
