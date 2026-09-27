@@ -62,6 +62,7 @@ jobs:
           POLARIS_SHA256: 17eac26d6c3ec7349c8446ba464734728207e3f1e7487f8dce617afb641c46f2
         run: |
           set -euo pipefail
+          cd "$(mktemp -d)"   # keep the archive and binary out of the checkout
           archive="polaris_${POLARIS_VERSION}_linux_amd64.tar.gz"
           curl -fsSL -o "${archive}" "https://github.com/FairwindsOps/polaris/releases/download/v${POLARIS_VERSION}/${archive}"
           echo "${POLARIS_SHA256}  ${archive}" | sha256sum -c -

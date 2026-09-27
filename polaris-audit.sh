@@ -25,8 +25,11 @@ chart_version="$(sed -n '/chart: polaris$/{n;s/.*targetRevision: *//p;}' k8s/arg
 [ -n "$chart_version" ] || { echo "Error: can't read the Polaris chart version from k8s/argocd/apps/polaris.yaml."; exit 1; }
 
 # The dashboard's config.yaml, as the chart renders it from our values (exemptions + merge flag).
-helm template polaris polaris --repo https://charts.fairwinds.com/stable --version "$chart_version" \
-    -f k8s/polaris/polaris-values.yaml --show-only templates/configmap.yaml \
+# Run from the empty temp dir: helm prefers a local `./polaris` (file or directory) over --repo, and
+# the Polaris binary is often right there in the working directory.
+(cd "$tmp" && helm template polaris polaris --repo https://charts.fairwinds.com/stable \
+    --version "$chart_version" -f "$OLDPWD/k8s/polaris/polaris-values.yaml" \
+    --show-only templates/configmap.yaml) \
   | kubectl label --local -f - render=only -o jsonpath='{.data.config\.yaml}' > "$tmp/config.yaml"
 
 mkdir "$tmp/manifests"
