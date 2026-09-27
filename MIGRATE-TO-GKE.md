@@ -211,6 +211,27 @@ Numbered in the order they were hit. "Commit" is the fix in this repo's history.
 - **Fix**: both namespaces exempted; the three objects exempted from that one rule each (see the
   comments in `k8s/polaris/polaris-values.yaml`).
 
+### 19. Teardown: cluster delete rejected during an autoscaler resize
+
+- **Symptom**: `gke-teardown.sh` (2026-09-27) failed at the cluster step: `Cluster is running
+  incompatible operation operation-...` - a `RESIZE_CLUSTER` started a minute earlier.
+- **Cause**: deleting the Gateway, Cloud SQL and the Argo CD-managed workloads emptied nodes, and
+  cluster-autoscaler began scaling down; GKE allows one cluster operation at a time.
+- **Fix**: re-ran after the resize finished (the script is idempotent); `gke-teardown.sh` now waits
+  (up to 20 min) for any running operation on the cluster before deleting it.
+
+### 20. Teardown: PVC disks missed - no cluster-name label on GKE 1.35.6
+
+- **Symptom**: after a "successful" teardown, the leftover check found two unattached 5 GB
+  `pvc-...` disks (`data-openobserve-0`, `data-trivy-server-0`) - the exact case problem 15 was
+  meant to cover; the script's step had printed nothing to delete.
+- **Cause**: on this GKE version the PD CSI driver's disks carry **no labels**, so the
+  `labels.goog-k8s-cluster-name=dev-cluster` filter matched nothing. The PVC is only recorded in
+  the disk's `description` (`"storage.gke.io/created-by":"pd.csi.storage.gke.io"`).
+- **Fix**: deleted by hand; the script now matches unattached disks in the cluster's zone that
+  have either the label or a `pvc-` name plus the PD CSI description. The new filter was checked
+  for syntax only (no disks were left to match) - verify it on the next teardown.
+
 ## Verified on the live cluster
 
 | What | Result |
@@ -237,13 +258,17 @@ Numbered in the order they were hit. "Commit" is the fix in this repo's history.
 | Polaris | Application Synced/Healthy; dashboard 200 on `localhost:8082` via `gke-port-forward.sh`; Kyverno PolicyReports in `polaris` 4/4 pass; `kubectl auth can-i` for its ServiceAccount: Secrets `no`, `pods/exec` `no`, `clusterrolebindings` list `yes` (needed by the RBAC checks) |
 | Polaris report | 1381/1810 checks passing (76%) before the problem 18 exemptions. Real dangers: Argo CD's exec/attach RBAC and `cluster-admin` binding (upstream chart), privilege escalation / run-as-root in `observability`, Headlamp and Trivy |
 | CI | `policy-check.yml` runs the Polaris audit (report only); `k8s/` scores 80 |
+| HTTPS on `api.miqui.dev` | **Not confirmed**: DNS -> `107.178.246.124`, Gateway `Programmed`/`GatewayHealthy`, certificate `ACTIVE`, but no answer yet ~9 min after the Gateway was created when the rebuild was cut short |
+| `gke-teardown.sh` | Failed once on problem 19, succeeded on re-run. Cloudflare `A` record removed via the API. NEG cleanup: nothing left (problem 14 fix works). Disk cleanup: missed 2 disks (problem 20). After manual cleanup: no cluster, SQL, instance, disk, NEG, address, forwarding rule, router or VPC; kept: `api-images`, 5 secrets, `api-cert`, service accounts, WIF pool `github` |
 
 ## Open items
 
 - **Polaris findings to work through**: harden the `observability` workloads (the same gap Kyverno
   audits), and review Argo CD's exec/attach and `cluster-admin` rights (upstream defaults).
 
-- **HTTPS on `api.miqui.dev`**: pending the recreated certificate reaching `ACTIVE` (problem 8).
+- **HTTPS on `api.miqui.dev`**: certificate now `ACTIVE`, but a working HTTPS response still hasn't
+  been seen - on the next build, allow 10-15 min after the Gateway is `Programmed` and run
+  `./test-api.sh`.
 - **Rotate exposed credentials**: the Argo CD initial admin password and the Grafana/OpenObserve
   passwords were printed during this session - change the Argo CD one in the UI (then delete
   `argocd-initial-admin-secret`), and the others in 1Password followed by `gke-secrets-seed.sh`.
@@ -254,5 +279,5 @@ Numbered in the order they were hit. "Commit" is the fix in this repo's history.
 - **Hazelcast's JMX agent** is downloaded from Maven Central on every start, which is the only
   reason the `default` namespace allows egress to the internet (port 443); baking the jar into an
   image would remove that rule.
-- **Re-run `gke-teardown.sh` once more** on the next cluster to confirm the NEG/disk cleanup added
-  for problems 14-15 end to end (the commands were checked against the project, not in a full run).
+- **Next teardown**: confirm the problem 20 disk filter deletes the `pvc-` disks and the problem 19
+  wait works (NEG cleanup is confirmed).

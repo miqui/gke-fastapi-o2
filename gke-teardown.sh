@@ -140,6 +140,17 @@ fi
 # ---- 2. GKE cluster ---------------------------------------------------------
 log "Deleting cluster: $CLUSTER (this takes several minutes)"
 if gcloud container clusters describe "$CLUSTER" --zone="$ZONE" &>/dev/null; then
+  # GKE rejects the delete ("Cluster is running incompatible operation") while another
+  # operation runs - typically a cluster-autoscaler resize triggered by the workload deletions
+  # above. Wait for those to finish (up to 20 min) first. The targetLink match covers the
+  # cluster and its node pools (a grouped `(/|$)` anchor matched nothing when tested).
+  for _ in $(seq 1 80); do
+    running=$(gcloud container operations list --zone="$ZONE" \
+      --filter="status!=DONE AND targetLink~/clusters/$CLUSTER" --format='value(operationType)' 2>/dev/null || true)
+    [[ -z "$running" ]] && break
+    echo "    waiting for running cluster operation(s): $(tr '\n' ' ' <<<"$running")"
+    sleep 15
+  done
   gcloud container clusters delete "$CLUSTER" --zone="$ZONE" --quiet
 else
   skip
@@ -183,11 +194,13 @@ else
 fi
 
 # Deleting a GKE cluster does NOT delete the persistent disks behind its PVCs (OpenObserve's
-# and the Trivy server's here); they'd keep billing. GKE labels them with the cluster name;
-# only unattached ones are touched.
-log "Checking for leftover PVC disks (label goog-k8s-cluster-name=$CLUSTER)"
+# and the Trivy server's here); they'd keep billing. Some GKE versions label them with the
+# cluster name; others (1.35.6, 2026-09-27) set no labels and only record the PVC in the
+# disk's description (`"storage.gke.io/created-by":"pd.csi.storage.gke.io"`, name `pvc-...`).
+# Match either, in the cluster's zone; only unattached disks are touched.
+log "Checking for leftover PVC disks (unattached pvc-* disks from the PD CSI driver in $ZONE)"
 LEFTOVER_DISKS=$(gcloud compute disks list \
-  --filter="labels.goog-k8s-cluster-name=$CLUSTER AND -users:*" \
+  --filter="-users:* AND zone:($ZONE) AND (labels.goog-k8s-cluster-name=$CLUSTER OR (name~^pvc- AND description:pd.csi.storage.gke.io))" \
   --format='value(name,zone.basename())' 2>/dev/null || true)
 if [[ -n "$LEFTOVER_DISKS" ]]; then
   while read -r disk zone; do
