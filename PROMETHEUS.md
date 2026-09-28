@@ -142,7 +142,7 @@ scrape_configs:
 **Used for two jobs only.** `node-exporter` (`kubernetes_sd_configs` role `pod`, limited to the
 `observability` namespace and pods labelled `app=node-exporter`) and `kubernetes-nodes-cadvisor`
 (role `node`, scraped through the API server proxy). Both follow the nodes, which the cluster
-autoscaler adds and removes. The other seven jobs (`otel-collector`, `kube-state-metrics`,
+autoscaler adds and removes. The other six jobs (`otel-collector`, `kube-state-metrics`,
 `openobserve`, `postgres-exporter`, `hazelcast`, `trivy-operator`) use `static_configs` pointing at
 a Service DNS name. There are no `ServiceMonitor`/`PodMonitor` objects (this is plain Prometheus,
 not Prometheus Operator), no `prometheus.io/*` annotation-based job, and GKE Managed Prometheus is
