@@ -1,9 +1,16 @@
 # Prometheus Config Changes — OpenObserve Observability Rollout
 
 All changes below are to `k8s/observability/config/prometheus.yml`, in the order they were
-actually made. Every `remote_write`/`scrape_configs` change (this ConfigMap has no
-`checksum/config`-style annotation, unlike the OpenObserve StatefulSet) required a manual
-`kubectl rollout restart deployment/prometheus -n observability` to take effect.
+actually made. At the time, the config was a plain ConfigMap, so every
+`remote_write`/`scrape_configs` change required a manual
+`kubectl rollout restart deployment/prometheus -n observability` to take effect. It no longer
+does: `k8s/observability/kustomization.yaml` now generates the ConfigMap with `configMapGenerator`,
+which puts a content hash in its name, so an edit changes the pod template and Argo CD rolls the
+Prometheus pod by itself.
+
+The snippets in steps 1-4 show the credentials as they were then (a literal `username`). The
+current config reads both from the `openobserve-remote-write-credentials` Secret via
+`username_file`/`password_file` - see the final state at the end.
 
 ## 1. Added `remote_write` to OpenObserve (unscoped — this broke)
 
@@ -105,7 +112,7 @@ default, confirmed live that `/metrics` returns HTTP 200 with an empty body othe
 remote_write:
   - url: http://openobserve.observability.svc.cluster.local:5080/api/default/prometheus/api/v1/write
     basic_auth:
-      username: root@example.com
+      username_file: /etc/prometheus/openobserve-auth/username
       password_file: /etc/prometheus/openobserve-auth/password
     write_relabel_configs:
       - source_labels: [job]
@@ -125,6 +132,7 @@ scrape_configs:
     static_configs:
       - targets: ['openobserve.observability.svc.cluster.local:5080']
 
-  # ... postgres-exporter, hazelcast, node-exporter, kubernetes-nodes-cadvisor jobs
-  # pre-existed this work and are unchanged - see config/prometheus.yml for the full file.
+  # ... postgres-exporter, hazelcast, node-exporter and kubernetes-nodes-cadvisor pre-existed
+  # this work and are unchanged; trivy-operator was added later - see config/prometheus.yml
+  # for the full file.
 ```
