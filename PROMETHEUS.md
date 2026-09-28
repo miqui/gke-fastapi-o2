@@ -136,3 +136,42 @@ scrape_configs:
   # this work and are unchanged; trivy-operator was added later - see config/prometheus.yml
   # for the full file.
 ```
+
+## Service discovery: where it's used, and why not more (reviewed 2026-09-28)
+
+**Used for two jobs only.** `node-exporter` (`kubernetes_sd_configs` role `pod`, limited to the
+`observability` namespace and pods labelled `app=node-exporter`) and `kubernetes-nodes-cadvisor`
+(role `node`, scraped through the API server proxy). Both follow the nodes, which the cluster
+autoscaler adds and removes. The other six jobs (`otel-collector`, `kube-state-metrics`,
+`openobserve`, `postgres-exporter`, `hazelcast`, `trivy-operator`) use `static_configs` pointing at
+a Service DNS name. There are no `ServiceMonitor`/`PodMonitor` objects (this is plain Prometheus,
+not Prometheus Operator), no `prometheus.io/*` annotation-based job, and GKE Managed Prometheus is
+off (`--no-enable-managed-prometheus` in `gke-deploy.sh`).
+
+**Why static targets are fine as things stand:**
+
+- Every statically scraped target runs **one replica**. Scraping a Service name only goes wrong
+  when several pods sit behind it: each scrape reaches a random pod, so counters jump between
+  pods' values.
+- The API (3-6 pods under the HPA) is never scraped. It pushes over OTLP to the collector, and
+  each series carries `k8s_pod_name`, so scaling it changes nothing here.
+- Discovery wouldn't make adding a target automatic: `default` and `observability` are
+  default-deny ingress, so a new target needs a NetworkPolicy rule letting Prometheus in anyway.
+
+**Not recommended:** Prometheus Operator (CRDs plus an operator pod on three `e2-standard-2`
+nodes, and a rewrite of a working setup for `ServiceMonitor`s), or re-enabling GKE Managed
+Prometheus (off on purpose - this repo runs its own).
+
+**When to add discovery:**
+
+1. **`otel-collector` scaled past one replica.** Switch that job to `kubernetes_sd_configs` with
+   `role: endpoints`, kept to the `otel-collector` Service, so every collector pod is scraped
+   separately. This is the one change that would otherwise break existing metrics.
+2. **Scraping platform components** (Argo CD, Kyverno, Crossplane, External Secrets - all expose
+   metrics nothing scrapes today). Add one annotation-based job (`role: pod`, keep
+   `prometheus.io/scrape: "true"`, port/path from `prometheus.io/port`/`prometheus.io/path`), plus
+   an ingress rule per namespace for Prometheus. Leave these jobs out of the `remote_write` keep
+   list above - OpenObserve's MemTable is what overflowed last time.
+
+**RBAC note:** `prometheus-rbac.yaml` also grants `services`, `endpoints` and `ingresses`, which no
+current job uses. `endpoints` becomes necessary with case 1; the rest can go.
